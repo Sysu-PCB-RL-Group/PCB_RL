@@ -1,0 +1,28 @@
+# IDE & Editor
+.vscode/
+.idea/
+
+# Python cache & builds
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CodeBuddy local data
+.codebuddy/
