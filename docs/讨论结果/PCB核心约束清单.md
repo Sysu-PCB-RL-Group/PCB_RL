@@ -150,7 +150,7 @@
 
 **来源**：
 - 工业设计实践：连接器、安装孔、天线、传感器等必须在特定位置
-- 现有 `kicad_utils.py:105` 已识别 `fp.IsLocked()` 但未在环境建模中正确使用
+- 现有 `utils/kicad_utils/kicad_utils.py:105` 已识别 `fp.IsLocked()` 但未在环境建模中正确使用
 
 ---
 

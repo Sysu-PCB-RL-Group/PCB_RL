@@ -520,7 +520,7 @@
 
 **当前代码问题定位**：
 - `pcb_utils.py` 第 107-113 行：遍历元件对，调用 `check_component_spacing()`
-- `kicad_utils.py` 第 262-269 行：`check_component_spacing()` 使用中心点距离 + 0.2mm 硬阈值
+- `utils/kicad_utils/kicad_utils.py` 第 262-269 行：`check_component_spacing()` 使用中心点距离 + 0.2mm 硬阈值
 
 **核心问题**：
 1. 中心点距离不能反映包围盒交叉——大芯片角可能已压住小电容

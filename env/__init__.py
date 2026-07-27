@@ -1,6 +1,10 @@
+"""PCB RL 环境模块。
+
+导出 PCBUtils 工具类和 PCBLayoutEnv Gymnasium 环境。
+基于 SPEC v2.1。
+"""
+
 from .pcb_utils import PCBUtils
 from .pcb_layout_env import PCBLayoutEnv
-from .pcb_routing_env import PCBRoutingEnv
-from .pcb_joint_env import PCBJointEnv
 
-__all__ = ['PCBUtils', 'PCBLayoutEnv', 'PCBRoutingEnv', 'PCBJointEnv']
+__all__ = ['PCBUtils', 'PCBLayoutEnv']

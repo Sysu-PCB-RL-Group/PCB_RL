@@ -20,6 +20,13 @@ venv/
 # Logs
 *.log
 
+# Generated output (推理产物)
+output/
+
+# Test artifacts
+.pytest_cache/
+*.pt
+
 # OS files
 .DS_Store
 Thumbs.db

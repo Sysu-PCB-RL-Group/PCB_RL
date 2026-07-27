@@ -1,0 +1,338 @@
+{
+  "name": "模拟PCB-001 小电源板",
+  "board_bounds": [
+    [
+      0,
+      0
+    ],
+    [
+      120.0,
+      80.0
+    ]
+  ],
+  "components": [
+    {
+      "id": "U1",
+      "footprint": "SOT-23",
+      "package_type": 1,
+      "bbox": [
+        0.0,
+        0.0,
+        2.9,
+        1.3
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VIN",
+        "GND",
+        "VOUT"
+      ],
+      "pins": [
+        [
+          "1",
+          0,
+          0.65
+        ],
+        [
+          "2",
+          2.9,
+          0.65
+        ],
+        [
+          "3",
+          1.45,
+          0.65
+        ]
+      ],
+      "footprint_w": 2.9,
+      "footprint_h": 1.3
+    },
+    {
+      "id": "C1",
+      "footprint": "C_0805",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        2.0,
+        1.25
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VIN",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.625
+        ],
+        [
+          "2",
+          2.0,
+          0.625
+        ]
+      ],
+      "footprint_w": 2.0,
+      "footprint_h": 1.25
+    },
+    {
+      "id": "C2",
+      "footprint": "C_1206",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        3.2,
+        1.6
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VOUT",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.8
+        ],
+        [
+          "2",
+          3.2,
+          0.8
+        ]
+      ],
+      "footprint_w": 3.2,
+      "footprint_h": 1.6
+    },
+    {
+      "id": "R1",
+      "footprint": "R_0805",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        2.0,
+        1.2
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VOUT",
+        "FB"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.6
+        ],
+        [
+          "2",
+          2.0,
+          0.6
+        ]
+      ],
+      "footprint_w": 2.0,
+      "footprint_h": 1.2
+    },
+    {
+      "id": "D1",
+      "footprint": "LED_0805",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        2.0,
+        1.25
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VOUT",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.625
+        ],
+        [
+          "2",
+          2.0,
+          0.625
+        ]
+      ],
+      "footprint_w": 2.0,
+      "footprint_h": 1.25
+    },
+    {
+      "id": "J1",
+      "footprint": "CONN-4",
+      "package_type": 4,
+      "bbox": [
+        2,
+        20,
+        12,
+        28
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": true,
+      "is_placed": true,
+      "nets": [
+        "VIN",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          4.0
+        ],
+        [
+          "2",
+          10.0,
+          4.0
+        ]
+      ],
+      "footprint_w": 10.0,
+      "footprint_h": 8.0
+    },
+    {
+      "id": "J2",
+      "footprint": "CONN-4",
+      "package_type": 4,
+      "bbox": [
+        66,
+        20,
+        76,
+        28
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": true,
+      "is_placed": true,
+      "nets": [
+        "VOUT",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          4.0
+        ],
+        [
+          "2",
+          10.0,
+          4.0
+        ]
+      ],
+      "footprint_w": 10.0,
+      "footprint_h": 8.0
+    }
+  ],
+  "nets": [
+    {
+      "net_id": "VIN",
+      "connections": [
+        [
+          "U1",
+          "1"
+        ],
+        [
+          "C1",
+          "1"
+        ],
+        [
+          "J1",
+          "1"
+        ]
+      ],
+      "is_power": false
+    },
+    {
+      "net_id": "GND",
+      "connections": [
+        [
+          "U1",
+          "2"
+        ],
+        [
+          "C1",
+          "2"
+        ],
+        [
+          "C2",
+          "2"
+        ],
+        [
+          "D1",
+          "2"
+        ],
+        [
+          "J1",
+          "2"
+        ],
+        [
+          "J2",
+          "2"
+        ]
+      ],
+      "is_power": true
+    },
+    {
+      "net_id": "VOUT",
+      "connections": [
+        [
+          "U1",
+          "3"
+        ],
+        [
+          "C2",
+          "1"
+        ],
+        [
+          "R1",
+          "1"
+        ],
+        [
+          "D1",
+          "1"
+        ],
+        [
+          "J2",
+          "1"
+        ]
+      ],
+      "is_power": false
+    },
+    {
+      "net_id": "FB",
+      "connections": [
+        [
+          "R1",
+          "2"
+        ]
+      ],
+      "is_power": false
+    }
+  ]
+}

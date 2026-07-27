@@ -1,0 +1,570 @@
+{
+  "name": "模拟PCB-005 通信接口板",
+  "board_bounds": [
+    [
+      0,
+      0
+    ],
+    [
+      120.0,
+      80.0
+    ]
+  ],
+  "components": [
+    {
+      "id": "U1",
+      "footprint": "QFP-64",
+      "package_type": 2,
+      "bbox": [
+        0.0,
+        0.0,
+        14.0,
+        14.0
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "GND",
+        "TX",
+        "RX",
+        "N1",
+        "N2"
+      ],
+      "pins": [
+        [
+          "1",
+          0,
+          7
+        ],
+        [
+          "16",
+          7,
+          14
+        ],
+        [
+          "32",
+          14,
+          7
+        ],
+        [
+          "48",
+          7,
+          0
+        ],
+        [
+          "64",
+          14,
+          7
+        ]
+      ],
+      "footprint_w": 14.0,
+      "footprint_h": 14.0
+    },
+    {
+      "id": "U2",
+      "footprint": "SOIC-14",
+      "package_type": 1,
+      "bbox": [
+        0.0,
+        0.0,
+        8.7,
+        4.0
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "GND",
+        "TX",
+        "RX"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          2.0
+        ],
+        [
+          "4",
+          8.7,
+          2.0
+        ]
+      ],
+      "footprint_w": 8.7,
+      "footprint_h": 4.0
+    },
+    {
+      "id": "U3",
+      "footprint": "TSSOP-20",
+      "package_type": 2,
+      "bbox": [
+        0.0,
+        0.0,
+        6.5,
+        4.4
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "GND",
+        "N1",
+        "N3"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          2.2
+        ],
+        [
+          "4",
+          6.5,
+          2.2
+        ]
+      ],
+      "footprint_w": 6.5,
+      "footprint_h": 4.4
+    },
+    {
+      "id": "C1",
+      "footprint": "C_0805",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        2.0,
+        1.25
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.625
+        ],
+        [
+          "2",
+          2.0,
+          0.625
+        ]
+      ],
+      "footprint_w": 2.0,
+      "footprint_h": 1.25
+    },
+    {
+      "id": "C2",
+      "footprint": "C_0603",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        1.6,
+        0.8
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.4
+        ],
+        [
+          "2",
+          1.6,
+          0.4
+        ]
+      ],
+      "footprint_w": 1.6,
+      "footprint_h": 0.8
+    },
+    {
+      "id": "C3",
+      "footprint": "C_0603",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        1.6,
+        0.8
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.4
+        ],
+        [
+          "2",
+          1.6,
+          0.4
+        ]
+      ],
+      "footprint_w": 1.6,
+      "footprint_h": 0.8
+    },
+    {
+      "id": "R1",
+      "footprint": "R_0603",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        1.6,
+        0.8
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "TX"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.4
+        ],
+        [
+          "2",
+          1.6,
+          0.4
+        ]
+      ],
+      "footprint_w": 1.6,
+      "footprint_h": 0.8
+    },
+    {
+      "id": "R2",
+      "footprint": "R_0603",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        1.6,
+        0.8
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "RX"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.4
+        ],
+        [
+          "2",
+          1.6,
+          0.4
+        ]
+      ],
+      "footprint_w": 1.6,
+      "footprint_h": 0.8
+    },
+    {
+      "id": "D1",
+      "footprint": "LED_0805",
+      "package_type": 0,
+      "bbox": [
+        0.0,
+        0.0,
+        2.0,
+        1.25
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": false,
+      "nets": [
+        "VCC",
+        "N3"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          0.625
+        ],
+        [
+          "2",
+          2.0,
+          0.625
+        ]
+      ],
+      "footprint_w": 2.0,
+      "footprint_h": 1.25
+    },
+    {
+      "id": "J1",
+      "footprint": "CONN-10",
+      "package_type": 4,
+      "bbox": [
+        2,
+        30,
+        27,
+        38
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": true,
+      "is_placed": true,
+      "nets": [
+        "VCC",
+        "GND",
+        "TX",
+        "RX",
+        "N3"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          4.0
+        ],
+        [
+          "5",
+          25.0,
+          4.0
+        ]
+      ],
+      "footprint_w": 25.0,
+      "footprint_h": 8.0
+    },
+    {
+      "id": "J2",
+      "footprint": "CONN-6",
+      "package_type": 4,
+      "bbox": [
+        104,
+        30,
+        118,
+        38
+      ],
+      "rotation": 0,
+      "layer": 0,
+      "is_fixed": true,
+      "is_placed": true,
+      "nets": [
+        "VCC",
+        "GND"
+      ],
+      "pins": [
+        [
+          "1",
+          0.0,
+          4.0
+        ],
+        [
+          "2",
+          14.0,
+          4.0
+        ]
+      ],
+      "footprint_w": 14.0,
+      "footprint_h": 8.0
+    }
+  ],
+  "nets": [
+    {
+      "net_id": "VCC",
+      "connections": [
+        [
+          "U1",
+          "1"
+        ],
+        [
+          "U2",
+          "1"
+        ],
+        [
+          "U3",
+          "1"
+        ],
+        [
+          "C1",
+          "1"
+        ],
+        [
+          "C2",
+          "1"
+        ],
+        [
+          "C3",
+          "1"
+        ],
+        [
+          "D1",
+          "1"
+        ],
+        [
+          "J1",
+          "1"
+        ],
+        [
+          "J2",
+          "1"
+        ]
+      ],
+      "is_power": true
+    },
+    {
+      "net_id": "GND",
+      "connections": [
+        [
+          "U1",
+          "2"
+        ],
+        [
+          "U2",
+          "2"
+        ],
+        [
+          "U3",
+          "2"
+        ],
+        [
+          "C1",
+          "2"
+        ],
+        [
+          "C2",
+          "2"
+        ],
+        [
+          "C3",
+          "2"
+        ],
+        [
+          "J1",
+          "2"
+        ],
+        [
+          "J2",
+          "2"
+        ]
+      ],
+      "is_power": true
+    },
+    {
+      "net_id": "TX",
+      "connections": [
+        [
+          "U1",
+          "3"
+        ],
+        [
+          "U2",
+          "3"
+        ],
+        [
+          "R1",
+          "1"
+        ],
+        [
+          "J1",
+          "3"
+        ]
+      ],
+      "is_power": false
+    },
+    {
+      "net_id": "RX",
+      "connections": [
+        [
+          "U1",
+          "4"
+        ],
+        [
+          "U2",
+          "4"
+        ],
+        [
+          "R2",
+          "1"
+        ],
+        [
+          "J1",
+          "4"
+        ]
+      ],
+      "is_power": false
+    },
+    {
+      "net_id": "N1",
+      "connections": [
+        [
+          "U1",
+          "5"
+        ],
+        [
+          "U3",
+          "3"
+        ]
+      ],
+      "is_power": false
+    },
+    {
+      "net_id": "N2",
+      "connections": [
+        [
+          "U1",
+          "6"
+        ]
+      ],
+      "is_power": false
+    },
+    {
+      "net_id": "N3",
+      "connections": [
+        [
+          "U3",
+          "4"
+        ],
+        [
+          "D1",
+          "2"
+        ],
+        [
+          "J1",
+          "5"
+        ]
+      ],
+      "is_power": false
+    }
+  ]
+}
