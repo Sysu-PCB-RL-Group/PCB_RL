@@ -30,6 +30,11 @@ result/
 # Test artifacts
 .pytest_cache/
 
+# KiCad
+*.kicad_prl
+*.kicad_pro
+.history/
+
 # PCB data（根据需要取消注释）
 # kicad-native-batch/
 
