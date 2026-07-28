@@ -526,7 +526,7 @@ fp.SetPosition(center_nm)
 
 ### 6.5 KiCad 版本依赖
 
-- KiCad 路径通过环境变量 `KICAD_PATH` 配置，默认回退 `D:\Program Files\KiCad\9.0`。
+- KiCad 路径通过环境变量 `KICAD_PATH` 配置，**不设默认值**（不同开发者路径不同）。
 - 若 KiCad 不可用，模块自动降级为空操作并打印警告（Mock 测试仍可正常使用）。
 - `pcbnew` Python API 在不同 KiCad 版本间可能存在 API 差异，升级版本时需回归测试导入导出功能。
 

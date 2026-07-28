@@ -32,7 +32,7 @@ class Config:
 
     # 训练参数
     GAMMA: float = 0.99
-    MAX_STEPS: int = 100
+    MAX_STEPS: int = 2000
     TOTAL_EPISODES: int = 10000
     SAVE_INTERVAL: int = 500
     LOG_INTERVAL: int = 100
@@ -207,9 +207,8 @@ class PCBLayoutEnv(gym.Env):
         """
         super().reset(seed=seed)
 
-        # 重新加载 PCB（恢复原始布局）
-        if not self.kicad.load_board(self._pcb_path):
-            raise RuntimeError(f"Failed to reload PCB during reset: {self._pcb_path}")
+        # 从内存缓存恢复原始布局（无需重新读取磁盘文件）
+        self.kicad.restore_initial_state()
 
         # 重建 movable/fixed 列表
         self.fixed_list = [c for c in self.kicad.components.values() if c.is_fixed]

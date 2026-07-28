@@ -100,6 +100,33 @@ class MockKiCadUtils:
                     comp.is_placed = state["is_placed"]
         return True
 
+    def restore_initial_state(self):
+        """从内存缓存恢复元件初始状态（不读磁盘）。
+
+        mock 模式下复用 load_board 的恢复逻辑（基于 _initial_state 快照）。
+        """
+        self.load_board("")
+
+    def export_layout(self, output_path, components, template_path=None):
+        """Mock 导出：将布局状态写入 JSON 文件。
+
+        mock 模式下无法生成真正的 .kicad_pcb，改用 JSON 保存布局快照。
+        """
+        import json
+        data = {
+            ref: {
+                "bbox": list(c.bbox),
+                "rotation": c.rotation,
+                "layer": c.layer,
+                "is_fixed": c.is_fixed,
+            }
+            for ref, c in components.items()
+        }
+        with open(output_path.replace(".kicad_pcb", ".json"), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"[OK] Mock layout exported: {output_path}")
+        return True
+
     def get_board_bounds(self):
         return self.board_bounds
 

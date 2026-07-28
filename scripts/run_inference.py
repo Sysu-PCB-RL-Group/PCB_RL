@@ -179,7 +179,7 @@ def run_inference_episode(
             )
             pad = len(str(env.N_movable))
             step_path = os.path.join(step_img_dir, f"step_{step_count:0{pad}d}.png")
-            title = f"Step {step_count} — {comp.id}  |  Reward={reward:.1f}"
+            title = f"Step {step_count} — {comp.id}  |  Reward={episode_reward:.1f}"
             from utils.visualization import draw_layout
             draw_layout(viz_comps, board_bounds, step_path, title=title)
 
@@ -207,6 +207,7 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
     comp_id_to_idx = {c.id: i for i, c in enumerate(env.movable_list)}
 
     pad = len(str(env.N_movable))
+    cumulative_reward = 0.0
 
     for i, act in enumerate(best_actions):
         comp_idx = comp_id_to_idx[act["comp_id"]]
@@ -218,6 +219,7 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
 
         _, reward, _, _, _ = env.step(full_action)
         env._reset_pending()
+        cumulative_reward += reward
 
         # 生成步骤图
         state_snap = snapshot_state(env)
@@ -227,7 +229,7 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
             (state_snap["board_bounds"]["max_x"], state_snap["board_bounds"]["max_y"]),
         )
         step_path = os.path.join(step_img_dir, f"step_{i+1:0{pad}d}.png")
-        title = f"Step {i+1} — {act['comp_id']}  |  Reward={reward:.1f}"
+        title = f"Step {i+1} — {act['comp_id']}  |  Reward={cumulative_reward:.1f}"
         draw_layout(viz_comps, board_bounds, step_path, title=title)
 
     logger.info(f"[Replay] {len(best_actions)} step images saved to {step_img_dir}")
@@ -260,6 +262,14 @@ def main():
         "--debug", action="store_true",
         help="输出步骤图、布局图、state JSON 等调试文件",
     )
+    parser.add_argument(
+        "--max-attempts", type=int, default=500,
+        help="最大尝试 episode 数（默认 500）",
+    )
+    parser.add_argument(
+        "--model", type=str, default=None,
+        help="训练好的模型权重路径（.pt），不指定则使用随机权重",
+    )
     args = parser.parse_args()
 
     if not args.data and not args.pcb:
@@ -291,7 +301,6 @@ def main():
         pcb_name = os.path.splitext(os.path.basename(args.pcb))[0]
         logger.info(f"Loading PCB from: {args.pcb}")
         env = PCBLayoutEnv(os.path.abspath(args.pcb))
-        env.reset()
         source_path = args.pcb
 
     Config = _C
@@ -327,10 +336,14 @@ def main():
         device=device,
         lr=Config.LEARNING_RATE, gamma=Config.GAMMA,
     )
-    logger.info(f"Agent created (random weights): obs_dim={obs_dim}")
+    if args.model:
+        agent.load(args.model)
+        logger.info(f"Agent created + loaded weights from: {args.model}")
+    else:
+        logger.info(f"Agent created (random weights): obs_dim={obs_dim}")
 
     # ---- 推理循环（搜索阶段，不生成步骤图） ----
-    MAX_ATTEMPTS = 500
+    MAX_ATTEMPTS = args.max_attempts
     best_reward = float("-inf")
     best_state = None
     best_episode = -1

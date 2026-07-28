@@ -1,4 +1,12 @@
+# === Python 依赖（pip install -r requirements.txt） ===
 gymnasium>=1.0.0
 numpy>=1.24.0
 torch>=2.0.0
 matplotlib>=3.5.0
+pytest>=7.0.0
+
+# === 系统依赖（需单独安装） ===
+# KiCad 10.0+（含 pcbnew Python API）
+# 下载: https://www.kicad.org/download/
+# 设置环境变量 KICAD_PATH 指向安装目录
+# Python 版本需与 KiCad 内置 Python 匹配（通常 3.11+）

@@ -13,21 +13,22 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Tuple, Dict, Any, Optional
 
-KICAD_PATH = os.environ.get(
-    "KICAD_PATH",
-    os.path.normpath(r"D:\pcb大模型\kicad"),
-)
+KICAD_PATH = os.environ.get("KICAD_PATH", "")
 
 KICAD_AVAILABLE = False
-try:
-    os.add_dll_directory(os.path.join(KICAD_PATH, "bin"))
-    sys.path.insert(0, os.path.join(KICAD_PATH, "bin", "Lib", "site-packages"))
-    sys.path.insert(0, os.path.join(KICAD_PATH, "bin"))
-    import pcbnew
-    KICAD_AVAILABLE = True
-except (OSError, ImportError) as e:
-    print(f"[WARN] KiCad not available at {KICAD_PATH}: {e}")
-    print("   (Mock mode still works; set KICAD_PATH env var before training)")
+if not KICAD_PATH:
+    print("[INFO] KICAD_PATH 未设置，跳过 KiCad 加载（Mock 模式可用）")
+    print("       设置方法: set KICAD_PATH=E:\\Kicad   （指向 KiCad 安装目录）")
+else:
+    try:
+        os.add_dll_directory(os.path.join(KICAD_PATH, "bin"))
+        sys.path.insert(0, os.path.join(KICAD_PATH, "bin", "Lib", "site-packages"))
+        sys.path.insert(0, os.path.join(KICAD_PATH, "bin"))
+        import pcbnew  # noqa: F401
+        KICAD_AVAILABLE = True
+    except (OSError, ImportError) as e:
+        print(f"[WARN] KiCad 加载失败 ({KICAD_PATH}): {e}")
+        print("       Mock 模式仍可用，训练前请确认 KICAD_PATH 正确")
 
 # ===================== 数据结构定义 =====================
 
@@ -129,7 +130,8 @@ class KiCadUtils:
         """
         try:
             self.board = pcbnew.LoadBoard(pcb_path)
-            print(f"✅ load pcb file: {pcb_path}")
+            if self.board is None:
+                raise RuntimeError(f"pcbnew.LoadBoard returned None (file not found or invalid format)")
 
             self.components.clear()
             self.nets.clear()
@@ -140,9 +142,10 @@ class KiCadUtils:
             self._calc_board_bounds()
 
             self._print_load_log()
+            print(f"[OK] load pcb file: {pcb_path}")
             return True
         except Exception as e:
-            print(f"❌ fail to load pcb file: {e}")
+            print(f"[FAIL] load pcb file: {e}")
             return False
 
     def _cache_footprints(self):
@@ -447,10 +450,26 @@ class KiCadUtils:
         输出元器件数量（固定/可移动）、网络数量、板框边界范围。
         """
         print("=" * 60)
-        print(f"📊 PCB 加载统计:")
+        print("PCB 加载统计:")
         fixed_count = sum(1 for c in self.components.values() if c.is_fixed)
         movable_count = len(self.components) - fixed_count
         print(f"  - 元器件: {len(self.components)} (固定: {fixed_count}, 可移动: {movable_count})")
         print(f"  - 网络: {len(self.nets)}")
         print(f"  - 板框边界: {self.board_bounds[0]} ~ {self.board_bounds[1]} mm")
         print("=" * 60)
+
+    # -------------------- 状态快照 / 恢复 --------------------
+
+    def restore_initial_state(self):
+        """从内存缓存恢复元件和网络的初始状态。
+
+        不重新读取磁盘文件，直接基于已缓存的 footprints/board 重建
+        components 和 nets，使所有元件回到 load_board() 时的原始位置。
+
+        RL 训练/推理中每个 episode 的 reset() 均可使用此方法替代 load_board()，
+        避免反复解析 PCB 文件。
+        """
+        self.components.clear()
+        self.nets.clear()
+        self._cache_components()
+        self._cache_nets()

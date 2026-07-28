@@ -1,45 +1,45 @@
-# ========== Reward 权重 ==========
-W_OVERLAP_HARD = 1000.0
-W_OVERLAP_SOFT = 50.0
-W_OUT_OF_BOUNDS_INITIAL = 100.0
-W_OUT_OF_BOUNDS_FINAL = 1000.0
-W_NET_AGGREGATION = 1.0
-W_CONGESTION = 1.0
-W_DECOUPLING = 1.0
-W_LARGE_COMP = 1.0
-W_COMPLETION = 500.0
+# ========== Reward 权重（负值为惩罚，正值为奖励） ==========
+W_OVERLAP_HARD        = 1000.0    # 硬重叠惩罚（元件物理碰撞，必须避免）
+W_OVERLAP_SOFT        = 50.0      # 软间距惩罚（元件距离太近但不重叠）
+W_OUT_OF_BOUNDS_INITIAL= 100.0    # 出板框初始惩罚（curriculum 前期宽松）
+W_OUT_OF_BOUNDS_FINAL  = 1000.0   # 出板框最终惩罚（curriculum 后期>500ep 收紧至此值）
+W_NET_AGGREGATION     = 1.0       # 网络聚集奖励（同一网络元件越近越好）
+W_CONGESTION          = 1.0       # 拥挤惩罚（局部元件密度过高）
+W_DECOUPLING           = 1.0      # 去耦电容配对奖励（去耦电容靠近对应 IC）
+W_LARGE_COMP           = 1.0      # 大型元件优先奖励（大元件早放有更多空位可选）
+W_COMPLETION           = 500.0    # 完成奖励（每成功放置一颗元件的基础分）
 
 # ========== 训练参数 ==========
-GAMMA = 0.99
-EPSILON_START = 1.0
-EPSILON_END = 0.01
-EPSILON_DECAY_EPISODES = 10000
-MAX_STEPS = 100
-EARLY_STOP_THRESHOLD = -500.0
-CURRICULUM_START_EP = 0
-CURRICULUM_END_EP = 500
-TOTAL_EPISODES = 10000
+GAMMA               = 0.99       # 折扣因子（0.99^5≈0.95，5步子任务间有效；跨元件衰减大但局部优先有益）
+EPSILON_START       = 1.0        # ε-greedy 初始探索率（完全随机）
+EPSILON_END         = 0.01       # ε-greedy 最终探索率（1% 随机探索）
+EPSILON_DECAY_EPISODES = 10000  # ε 从 START 线性衰减到 END 需要多少个 episode
+MAX_STEPS           = 2000       # 单 episode 最大环境步数（233 元件×5 子步≈1165，留余量）
+EARLY_STOP_THRESHOLD  = -10000.0 # 累计 reward 低于此值提前终止 episode（放宽避免早切）
+CURRICULUM_START_EP = 0          # curriculum 起始 episode（出界惩罚从轻到重）
+CURRICULUM_END_EP   = 500        # curriculum 截止 episode（500ep 后出界惩罚=最终值）
+TOTAL_EPISODES      = 10000      # 总训练 episode 数
 
 # ========== DQN 训练参数 ==========
-BATCH_SIZE = 64
-REPLAY_BUFFER_SIZE = 10000
-LEARNING_RATE = 0.0001
-TARGET_UPDATE_FREQ = 100
+BATCH_SIZE          = 64         # 每次从 replay buffer 采样的批量大小
+REPLAY_BUFFER_SIZE  = 100000     # 经验回放池容量（存满后旧经验被覆盖）
+LEARNING_RATE       = 0.0001     # Adam 优化器学习率
+TARGET_UPDATE_FREQ  = 100        # target 网络同步频率（每 N 次学习更新一次目标网络）
 
-# ========== 几何阈值 ==========
-BOARD_MARGIN = 1.0
-DECOUPLING_MAX_DIST = 5.0
-CELL_SIZE = 1.0
-CONGESTION_CELL_SIZE = 2.0
-DEFAULT_SPACING = 0.25
+# ========== 几何阈值（单位：mm） ==========
+BOARD_MARGIN        = 1.0        # 板框内缩边距（元件必须在此范围内）
+DECOUPLING_MAX_DIST = 5.0        # 去耦电容到 IC 的最大有效距离
+CELL_SIZE           = 1.0        # 网格离散化单位（1mm/格）
+CONGESTION_CELL_SIZE= 2.0        # 拥塞检测的单元格大小
+DEFAULT_SPACING     = 0.25       # 默认元件间距（不匹配特定封装类型时使用）
 
-# ========== 分类间距阈值 ==========
-SPACING_CHIP = 0.2
-SPACING_SOIC = 1.25
-SPACING_QFP = 2.5
-SPACING_BGA = 5.0
-SPACING_IC = 2.0
+# ========== 分类间距阈值（单位：mm，同类封装之间最小距离） ==========
+SPACING_CHIP        = 0.2        # 片式元件（电阻电容电感等小封装）
+SPACING_SOIC        = 1.25       # SOIC/SOP 等翼形引脚 IC
+SPACING_QFP         = 2.5        # QFP/LQFP 四面引脚 IC
+SPACING_BGA         = 5.0        # BGA 球栅阵列 IC（需更大空间散热）
+SPACING_IC          = 2.0        # 通用 IC 间距（未匹配到具体类型时的默认值）
 
 # ========== 日志 & 保存 ==========
-LOG_INTERVAL = 100
-SAVE_INTERVAL = 500
+LOG_INTERVAL        = 100        # 日志打印间隔（每 N 个 episode 输出一次）
+SAVE_INTERVAL       = 500        # 模型保存间隔（每 N 个 episode 存一次 .pt）
