@@ -333,6 +333,16 @@ class KiCadUtils:
                 e = drawing.GetEnd()
                 all_vertices.append((pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)))
                 all_vertices.append((pcbnew.ToMM(e.x), pcbnew.ToMM(e.y)))
+            elif shape_type in ("Bezier", "Curve"):
+                # 贝塞尔曲线：控制点 + 端点共同构成边界框
+                s = drawing.GetStart()
+                e = drawing.GetEnd()
+                c1 = drawing.GetBezControl1()
+                c2 = drawing.GetBezControl2()
+                all_vertices.append((pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)))
+                all_vertices.append((pcbnew.ToMM(e.x), pcbnew.ToMM(e.y)))
+                all_vertices.append((pcbnew.ToMM(c1.x), pcbnew.ToMM(c1.y)))
+                all_vertices.append((pcbnew.ToMM(c2.x), pcbnew.ToMM(c2.y)))
             elif shape_type == "Polygon":
                 poly = drawing.GetPolyShape()
                 for oi in range(poly.OutlineCount()):

@@ -70,7 +70,10 @@ class Config:
                         continue
                     key, _, val = line.partition("=")
                     key = key.strip()
-                    val_str = val.strip()
+                    # 剥离行尾注释（# 之后的内容），再 strip 一次去尾部空白
+                    val_str = val.split("#")[0].strip()
+                    if not val_str:
+                        continue
                     try:
                         # 先尝试整数解析（避免浮点精度问题），失败则 float
                         val = int(val_str)
@@ -370,7 +373,7 @@ class PCBLayoutEnv(gym.Env):
         print(f"Placed: {len(self.placed_list)} / {self.N_movable}")
         print(f"Cumulative Reward: {self.cumulative_reward:.2f}")
         for comp in self.movable_list:
-            status = "✓" if comp.is_placed else "✗"
+            status = "[placed]" if comp.is_placed else "[unplaced]"
             if comp.is_placed:
                 x1, y1, x2, y2 = comp.bbox
                 print(f"  [{status}] {comp.id:6s}  bbox=({x1:.1f},{y1:.1f})-({x2:.1f},{y2:.1f})"
@@ -687,7 +690,8 @@ class PCBLayoutEnv(gym.Env):
         """
         obs = self._get_obs_with_pending(0)
         self.current_step += 1
-        truncated = self.current_step >= Config.MAX_STEPS
+        truncated = self.current_step >= Config.MAX_STEPS \
+                    or self.cumulative_reward < Config.EARLY_STOP_THRESHOLD
         info = {
             "step": self.current_step,
             "invalid_action": reason,

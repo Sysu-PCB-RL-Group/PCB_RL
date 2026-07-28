@@ -97,17 +97,22 @@ class Runner:
                 # 按当前 env 维度初始化 Agent 和 Buffer
                 agent, buffer = self._init_agent_and_buffer(env)
 
+                # 重置本 PCB 的最佳布局追踪
+                pcb_best_reward = float("-inf")
+                pcb_best_state = None
+                pcb_best_episode = -1
+
                 for ep in range(total_episodes):
                     self.episode_num += 1
                     ep_reward, ep_steps, ep_placed, avg_loss = self._run_episode(
                         env, agent, buffer, pcb_name
                     )
 
-                    # 追踪最佳布局
-                    if ep_reward > self.best_layout_reward:
-                        self.best_layout_reward = ep_reward
-                        self.best_layout_state = self._snapshot_state(env)
-                        self.best_layout_episode = self.episode_num
+                    # 追踪当前 PCB 最佳布局
+                    if ep_reward > pcb_best_reward:
+                        pcb_best_reward = ep_reward
+                        pcb_best_state = self._snapshot_state(env)
+                        pcb_best_episode = self.episode_num
 
                     # 记录 & 保存
                     self._log_episode(
@@ -116,6 +121,13 @@ class Runner:
 
                     if self.episode_num % Config.SAVE_INTERVAL == 0:
                         self._save_checkpoint(agent, pcb_name)
+
+                # 每块 PCB 训练完后导出其最佳布局
+                if pcb_best_state is not None:
+                    self.best_layout_reward = pcb_best_reward
+                    self.best_layout_state = pcb_best_state
+                    self.best_layout_episode = pcb_best_episode
+                    self._export_best_layout(pcb_name)
             finally:
                 env.close()
 

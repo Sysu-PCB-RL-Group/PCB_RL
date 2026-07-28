@@ -228,3 +228,155 @@ def test_assemble_action_correct_shape():
     expected_h = max(1, int(comp.footprint_h / Config.CELL_SIZE))
     assert action[3] == 30 + expected_w
     assert action[4] == 20 + expected_h
+
+
+# ==================== terminated / truncated ====================
+
+
+def test_terminated_when_all_placed():
+    """全部 movable 元件成功放置后 terminated=True。
+
+    逐个放置所有元件，在最后一个上验证 terminated。
+    """
+    from env.mock_pcb import create_patched_env
+    env = create_patched_env()
+    env.reset()
+
+    # 逐个放置所有可移动元件（选不重叠的网格位置）
+    placed = 0
+    for i, comp in enumerate(env.movable_list):
+        ndx = max(1, int(comp.footprint_w / Config.CELL_SIZE))
+        ndy = max(1, int(comp.footprint_h / Config.CELL_SIZE))
+        gx = 5 + i * 15  # 分散放置避免碰撞
+        gy = 5 + i * 10
+        if gx + ndx >= env.grid_width or gy + ndy >= env.grid_height:
+            continue  # 超出网格范围就跳过
+        action = (i, gx, gy, gx + ndx, gy + ndy, 0, 0)
+        _, reward, terminated, truncated, info = env.step(action)
+        if info["placed_count"] > placed:
+            placed = info["placed_count"]
+
+    # 最后一个应触发 terminated
+    if placed == env.N_movable:
+        assert terminated, "Should be terminated when all components placed"
+    else:
+        pytest.skip(f"Could not place all {env.N_movable} components in test")
+
+
+def test_truncated_on_max_steps():
+    """超过 MAX_STEPS 后 truncated=True。"""
+    from env.mock_pcb import create_patched_env
+    env = create_patched_env()
+    env.reset()
+
+    # 不断发送无效动作直到 current_step 接近 MAX_STEPS
+    old_max = Config.MAX_STEPS
+    Config.MAX_STEPS = 5
+    try:
+        terminated, truncated = False, False
+        for _ in range(10):
+            obs, reward, terminated, truncated, info = env.step((0, 999, 999, 999, 999, 0, 0))
+            if truncated:
+                break
+        assert truncated, "Should be truncated after MAX_STEPS"
+    finally:
+        Config.MAX_STEPS = old_max
+
+
+def test_early_stop_on_low_reward():
+    """累计 reward 低于 EARLY_STOP_THRESHOLD 后应 truncated。"""
+    from env.mock_pcb import create_patched_env
+    env = create_patched_env()
+    env.reset()
+    assert env.N_movable >= 2, "Need at least 2 movable components"
+
+    old_threshold = Config.EARLY_STOP_THRESHOLD
+    Config.EARLY_STOP_THRESHOLD = -10.0
+    Config.W_OVERLAP_HARD = 10000
+    try:
+        # 先放置元件 0
+        comp0 = env.movable_list[0]
+        ndx = max(1, int(comp0.footprint_w / Config.CELL_SIZE))
+        ndy = max(1, int(comp0.footprint_h / Config.CELL_SIZE))
+        action0 = (0, 10, 10, 10 + ndx, 10 + ndy, 0, 0)
+        obs, r1, _, _, info1 = env.step(action0)
+        if info1["placed_count"] == 0:
+            pytest.skip("First placement failed, cannot test early stop")
+
+        # 用元件 1 叠放在元件 0 的同一位置 → 巨额碰撞惩罚
+        comp1 = env.movable_list[1]
+        ndx1 = max(1, int(comp1.footprint_w / Config.CELL_SIZE))
+        ndy1 = max(1, int(comp1.footprint_h / Config.CELL_SIZE))
+        action1 = (1, 10, 10, 10 + ndx1, 10 + ndy1, 0, 0)
+        obs, r2, _, truncated, _ = env.step(action1)
+        assert truncated, (
+            f"Should have hit EARLY_STOP after penalty; cumulative_reward={env.cumulative_reward}"
+        )
+    finally:
+        Config.EARLY_STOP_THRESHOLD = old_threshold
+        Config.W_OVERLAP_HARD = 1000.0
+
+
+def test_action_space_on_mock_env():
+    """mock env 应正确设置 action_space（回归：__new__ 绕过 gym.__init__）。"""
+    from env.mock_pcb import create_patched_env
+    env = create_patched_env()
+    assert env.action_space is not None, "action_space should not be None (regression)"
+    assert len(env.action_space) == 7, "action_space should be 7-tuple"
+
+
+# ==================== Config ====================
+
+
+def test_config_load_from_file_inline_comments():
+    """验证 Config.load_from_file 正确剥离行尾 # 注释并加载参数。
+
+    回归测试：修复前因注释导致所有参数被静默跳过（REPLAY_BUFFER_SIZE 始终为默认 10000）。
+    """
+    import tempfile
+
+    # 保存当前 Config 值，测试后恢复
+    saved = {k: getattr(Config, k) for k in dir(Config)
+             if not k.startswith("_") and not callable(getattr(Config, k))}
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
+            f.write("REPLAY_BUFFER_SIZE  = 87654    # comment\n")
+            f.write("W_OVERLAP_HARD       = 3141.59  # float with comment\n")
+            f.write("MAX_STEPS            = 777      # int with comment\n")
+            f.write("# 纯注释行应被跳过\n")
+            f.write("\n")  # 空行
+            f.write("EARLY_STOP_THRESHOLD  = -99999.0  # negative with comment\n")
+            tmp_path = f.name
+
+        Config.REPLAY_BUFFER_SIZE = 10000  # 重置为默认
+        Config.W_OVERLAP_HARD = 1000.0
+        Config.MAX_STEPS = 2000
+        Config.EARLY_STOP_THRESHOLD = -500.0
+
+        Config.load_from_file(tmp_path)
+
+        assert Config.REPLAY_BUFFER_SIZE == 87654, \
+            f"Expected 87654, got {Config.REPLAY_BUFFER_SIZE}"
+        assert abs(Config.W_OVERLAP_HARD - 3141.59) < 0.01, \
+            f"Expected 3141.59, got {Config.W_OVERLAP_HARD}"
+        assert Config.MAX_STEPS == 777, \
+            f"Expected 777, got {Config.MAX_STEPS}"
+        assert Config.EARLY_STOP_THRESHOLD == -99999.0, \
+            f"Expected -99999.0, got {Config.EARLY_STOP_THRESHOLD}"
+    finally:
+        # 恢复原始值
+        for k, v in saved.items():
+            if isinstance(v, (int, float, str, bool, type(None))):
+                setattr(Config, k, v)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def test_config_spacing_threshold():
+    """spacing_threshold_for 返回两个封装类型间距阈值的 max。"""
+    thresholds = [0.2, 1.25, 2.5, 5.0, 2.0]
+    for i in range(5):
+        for j in range(5):
+            expected = max(thresholds[i], thresholds[j])
+            assert Config.spacing_threshold_for(i, j) == expected

@@ -31,9 +31,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
-logger = logging.getLogger(__name__)
-
-OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
 
 
 # ==================== 状态快照 ====================
@@ -113,6 +110,61 @@ def _snapshot_to_viz_components(state_snap: Dict) -> list:
     return components
 
 
+# ==================== 推理保底：C3-5 clamp ====================
+
+def _clamp_action_to_board(env, comp_idx: int, gx1: int, gy1: int, gx2: int, gy2: int,
+                           rot: int, lay: int) -> Tuple[int, int, int, int, int, int, int]:
+    """推理阶段安全网：将网络输出的网格坐标 clamp 至 valid_area 内。
+
+    保底机制：
+      1. 网格坐标 → mm 坐标
+      2. 调用 PCBUtils.clamp_to_board() 将 AABB 推回板框内（保持宽高不变，仅平移）
+      3. mm 坐标 → 网格坐标
+
+    无论模型输出多离谱的坐标，元件最终都会落在板框有效区域内，
+    避免 inference 中因出界导致元件放置失败 → 浪费一步重试。
+
+    Args:
+        env: PCBLayoutEnv 实例
+        comp_idx: 元件在 movable_list 中的索引
+        gx1, gy1, gx2, gy2: 原始网格坐标
+        rot, lay: 旋转和层（不透传 clamp，原样返回）
+
+    Returns:
+        (comp_idx, gx1, gy1, gx2, gy2, rot, lay) 保底后的 7 元动作
+    """
+    from env.pcb_utils import PCBUtils
+    from env.pcb_layout_env import Config
+
+    comp = env.movable_list[comp_idx]
+
+    # 1. 网格 → mm
+    x1 = env.valid_area[0] + gx1 * Config.CELL_SIZE
+    y1 = env.valid_area[1] + gy1 * Config.CELL_SIZE
+    x2 = env.valid_area[0] + gx2 * Config.CELL_SIZE
+    y2 = env.valid_area[1] + gy2 * Config.CELL_SIZE
+
+    # 2. Clamp 保底（宽高不变，仅平移）
+    x1, y1, x2, y2 = PCBUtils.clamp_to_board(x1, y1, x2, y2, env.valid_area)
+
+    # 3. mm → 网格
+    new_gx1 = max(0, int(round((x1 - env.valid_area[0]) / Config.CELL_SIZE)))
+    new_gy1 = max(0, int(round((y1 - env.valid_area[1]) / Config.CELL_SIZE)))
+    # gx2/gy2 从 footprint + 新原点重新推导，保持宽高一致
+    gw = max(1, int(comp.footprint_w / Config.CELL_SIZE))
+    gh = max(1, int(comp.footprint_h / Config.CELL_SIZE))
+    new_gx2 = new_gx1 + gw
+    new_gy2 = new_gy1 + gh
+
+    if (new_gx1, new_gy1) != (gx1, gy1):
+        logger.debug(
+            f"[CLAMP] {comp.id}: grid ({gx1},{gy1})→({new_gx1},{new_gy1}), "
+            f"mm ({x1:.1f},{y1:.1f})"
+        )
+
+    return (comp_idx, new_gx1, new_gy1, new_gx2, new_gy2, rot, lay)
+
+
 # ==================== 推理 Episode ====================
 
 def run_inference_episode(
@@ -145,8 +197,9 @@ def run_inference_episode(
             action = agent.select_action(obs, mask, step_id, epsilon=0.0)
             env._update_pending(action, step_id)
 
-        # ---- env.step() ----
+        # ---- env.step()（C3-5 保底：clamp 坐标到板框内） ----
         full_action = env._assemble_action()
+        full_action = _clamp_action_to_board(env, *full_action)
         obs_next, reward, terminated, truncated, info = env.step(full_action)
         done = terminated or truncated
         episode_reward += reward
@@ -216,6 +269,8 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
             act["gx1"], act["gy1"], act["gx2"], act["gy2"],
             act["rot"], act["lay"],
         )
+        # C3-5 保底：重放时同样 clamp 坐标
+        full_action = _clamp_action_to_board(env, *full_action)
 
         _, reward, _, _, _ = env.step(full_action)
         env._reset_pending()

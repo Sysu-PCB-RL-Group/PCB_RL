@@ -285,6 +285,17 @@ def _init_env_from_kicad(env, kicad: MockKiCadUtils, pcb_path: str):
     env.W_OUT_OF_BOUNDS_CURRENT = Config.W_OUT_OF_BOUNDS_INITIAL
     env._last_reward_breakdown = {}
 
+    # 动作空间（与 PCBLayoutEnv.__init__ 一致，补齐 __new__ 绕过 gym.Env.__init__ 的缺漏）
+    env.action_space = spaces.Tuple([
+        spaces.Discrete(env.N_movable),       # component_id
+        spaces.Discrete(env.grid_width),       # x1
+        spaces.Discrete(env.grid_height),      # y1
+        spaces.Discrete(env.grid_width),       # x2
+        spaces.Discrete(env.grid_height),      # y2
+        spaces.Discrete(4),                    # rotation
+        spaces.Discrete(2),                    # layer
+    ])
+
     obs_dim = env.N_movable * 8 + env.N_movable + 4
     env.observation_space = spaces.Box(
         low=0.0,

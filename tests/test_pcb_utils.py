@@ -137,6 +137,92 @@ def test_decoupling_empty_nets():
     assert result == {}
 
 
+def test_decoupling_identifies_ic_cap_pairs():
+    """电源网络上 IC + MLCC 电容 → 应识别为去耦对。"""
+    from env.mock_pcb import MockComponent, MockNet
+
+    nets = {
+        "VCC": MockNet(net_id="VCC", connections=[("U1", "1"), ("C1", "1")], is_power=True),
+        "GND": MockNet(net_id="GND", connections=[("U1", "2"), ("C2", "1")], is_power=True),
+        "SIG1": MockNet(net_id="SIG1", connections=[("U1", "3"), ("R1", "1")], is_power=False),
+    }
+    components = {
+        "U1": MockComponent(id="U1", footprint="QFP-44", package_type=2, nets=["VCC", "GND", "SIG1"]),
+        "C1": MockComponent(id="C1", footprint="C_0603", package_type=0, nets=["VCC"]),
+        "C2": MockComponent(id="C2", footprint="C_0805", package_type=0, nets=["GND"]),
+        "R1": MockComponent(id="R1", footprint="R_0805", package_type=0, nets=["SIG1"]),
+    }
+
+    pairs = PCBUtils.identify_decoupling_pairs(nets, components)
+    assert "U1" in pairs, "U1 should have decoupling caps"
+    assert "C1" in pairs["U1"], "C1 should be paired with U1 on VCC"
+    assert "C2" in pairs["U1"], "C2 should be paired with U1 on GND"
+
+
+def test_decoupling_no_power_net():
+    """非电源网络不应产生去耦对。"""
+    from env.mock_pcb import MockComponent, MockNet
+
+    nets = {"SIG1": MockNet(net_id="SIG1", connections=[("U1", "1"), ("C1", "1")], is_power=False)}
+    components = {
+        "U1": MockComponent(id="U1", footprint="QFP-44", package_type=2, nets=["SIG1"]),
+        "C1": MockComponent(id="C1", footprint="C_0603", package_type=0, nets=["SIG1"]),
+    }
+    pairs = PCBUtils.identify_decoupling_pairs(nets, components)
+    assert pairs == {}, "Non-power net should not produce decoupling pairs"
+
+
+def test_min_pin_to_cap_distance_no_pins():
+    """无引脚信息 → 退化为 center 距离。"""
+    from env.mock_pcb import MockComponent
+
+    ic = MockComponent(id="U1", bbox=(0, 0, 10, 10), pins=[])
+    cap = MockComponent(id="C1", bbox=(50, 50, 52, 51))
+    dist = PCBUtils.min_pin_to_cap_distance(ic, cap)
+    # ic.center=(5,5), cap.center=(51,50.5), dist ≈ 64mm
+    assert dist > 40.0
+
+
+def test_min_pin_to_cap_distance_with_pins():
+    """有引脚 → 取最近引脚的欧氏距离。"""
+    from env.mock_pcb import MockComponent
+
+    ic = MockComponent(id="U1", bbox=(0, 0, 10, 10),
+                       pins=[("1", 0, 5), ("44", 10, 5)])
+    cap = MockComponent(id="C1", bbox=(12, 2, 14, 3))
+    # pin 44 at abs=(10,5), cap.center=(13,2.5), dist≈3.9mm
+    dist = PCBUtils.min_pin_to_cap_distance(ic, cap)
+    assert dist < 10.0
+
+
+# ---- 拥塞标准差 ----
+
+
+def test_congestion_with_components():
+    """有元件时拥塞 std > 0。"""
+    from env.mock_pcb import MockComponent, MockNet
+
+    comps = [
+        MockComponent(id="U1", bbox=(10, 10, 20, 20), nets=["N1", "N2"]),
+        MockComponent(id="U2", bbox=(60, 50, 70, 60), nets=["N1"]),
+    ]
+    nets = {
+        "N1": MockNet(net_id="N1"),
+        "N2": MockNet(net_id="N2"),
+    }
+    std = PCBUtils.congestion_std(comps, nets, (0, 0, 100, 80), cell_size=5.0)
+    assert std > 0.0, "Congestion std should be > 0 with placed components"
+
+
+def test_bbox_overlap_diagonal_corner():
+    """对角分离的 bbox → hard=0, soft=0（角对角，无共享边）。"""
+    hard, soft = PCBUtils.bbox_overlap_penalty(
+        (0, 10, 10, 20), (10, 0, 20, 10), 5.0
+    )
+    assert hard == 0.0
+    assert soft == 0.0
+
+
 # ==================== C6：拥塞均衡度 ====================
 
 
