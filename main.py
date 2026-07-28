@@ -24,7 +24,7 @@ def get_config():
     # === 核心路径 ===
     parser.add_argument(
         "--data_dir", type=str,
-        default=os.path.abspath(os.path.join(os.path.dirname(__file__), "data")),
+        default=os.path.abspath(os.path.join(os.path.dirname(__file__), "kicad-native-batch")),
         help="PCB 文件目录",
     )
     parser.add_argument(

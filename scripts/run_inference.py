@@ -1,5 +1,6 @@
 """纯推理 Demo：使用合成 PCB 数据 + 随机 DQN 权重反复尝试布局。
 
+支持 --data（JSON mock 数据）和 --pcb（真实 .kicad_pcb 文件）两种输入。
 不训练（epsilon=0），反复 episode 直到成功放置全部可移动元件。
 追踪 reward 最高的布局，输出 state JSON + 可视化 PNG + 日志到 output/。
 """
@@ -10,28 +11,14 @@ import os
 # 确保项目根目录在 path 中
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# ---- mock utils.kicad_utils 必须在 import env 之前 ----
-from unittest import mock
-_m = mock.MagicMock()
-sys.modules["utils.kicad_utils"] = _m
-
 import json
 import logging
 import time
 from typing import List, Tuple, Dict, Optional
+from unittest import mock
 
 import numpy as np
 import torch
-
-from env.mock_pcb import create_env_from_json, MockKiCadUtils, MockComponent, MockNet
-# 手动将 mock 子模块 attach 到 utils 并注入类（供 env.pcb_layout_env 中 from utils.kicad_utils import KiCadUtils 使用）
-import utils
-utils.kicad_utils = sys.modules["utils.kicad_utils"]
-utils.kicad_utils.KiCadUtils = MockKiCadUtils
-utils.kicad_utils.Component = MockComponent
-utils.kicad_utils.Net = MockNet
-
-from env.pcb_layout_env import Config
 from dqn import DQNAgent
 
 logging.basicConfig(
@@ -41,6 +28,9 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
     ],
 )
+logger = logging.getLogger(__name__)
+
+OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
@@ -57,6 +47,8 @@ def snapshot_state(env) -> Dict:
     Returns:
         dict 含 board_bounds, movable_count, fixed_count, components 列表
     """
+    from env.pcb_layout_env import Config
+
     (min_x, min_y), (max_x, max_y) = env.board_bounds
 
     components = []
@@ -246,22 +238,63 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
 def main():
     """主推理流程：反复尝试直到全部放置成功。
 
-    支持 --data 参数指定 JSON 数据文件，否则使用合成默认 PCB。
+    支持 --data（JSON mock 数据）和 --pcb（真实 .kicad_pcb 文件）两种输入。
     所有输出放入 output/<pcb_name>/ 目录。
     """
     import argparse
 
     parser = argparse.ArgumentParser(description="PCB Layout Inference Demo")
     parser.add_argument(
-        "--data", type=str, required=True,
-        help="Path to PCB JSON data file (e.g. data/模拟/pcb_001.json).",
+        "--data", type=str, default=None,
+        help="PCB JSON 数据文件 (e.g. data/模拟/pcb_001.json).",
+    )
+    parser.add_argument(
+        "--pcb", type=str, default=None,
+        help=".kicad_pcb 文件路径 (从真实 KiCad 项目加载).",
+    )
+    parser.add_argument(
+        "--export", type=str, default=None,
+        help="导出最佳布局为 .kicad_pcb 文件路径（默认自动导出）",
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="输出步骤图、布局图、state JSON 等调试文件",
     )
     args = parser.parse_args()
 
-    # ---- 确定 PCB 名称与加载数据 ----
-    pcb_name = os.path.splitext(os.path.basename(args.data))[0]
-    logger.info(f"Loading PCB from JSON: {args.data}")
-    env = create_env_from_json(os.path.abspath(args.data))
+    if not args.data and not args.pcb:
+        parser.error("必须指定 --data 或 --pcb")
+
+    # ---- 加载数据（两种路径） ----
+    if args.data:
+        # JSON mock 路径：注入 mock KiCad
+        _m = mock.MagicMock()
+        sys.modules["utils.kicad_utils"] = _m
+
+        from env.mock_pcb import create_env_from_json, MockKiCadUtils, MockComponent, MockNet
+        import utils as _utils
+        _utils.kicad_utils = sys.modules["utils.kicad_utils"]
+        _utils.kicad_utils.KiCadUtils = MockKiCadUtils
+        _utils.kicad_utils.Component = MockComponent
+        _utils.kicad_utils.Net = MockNet
+        from env.pcb_layout_env import Config as _C
+
+        pcb_name = os.path.splitext(os.path.basename(args.data))[0]
+        logger.info(f"Loading PCB from JSON: {args.data}")
+        env = create_env_from_json(os.path.abspath(args.data))
+        source_path = args.data
+
+    else:  # --pcb
+        # 真实 KiCad 路径：不 mock
+        from env.pcb_layout_env import PCBLayoutEnv, Config as _C
+
+        pcb_name = os.path.splitext(os.path.basename(args.pcb))[0]
+        logger.info(f"Loading PCB from: {args.pcb}")
+        env = PCBLayoutEnv(os.path.abspath(args.pcb))
+        env.reset()
+        source_path = args.pcb
+
+    Config = _C
 
     # ---- 创建输出目录 ----
     pcb_output_dir = os.path.join(OUTPUT_DIR, pcb_name)
@@ -347,55 +380,51 @@ def main():
 
     # ---- 输出（全部放入 output/<pcb_name>/ 目录） ----
 
-    # 4a. 重放最佳 episode 生成步骤图
-    if best_actions:
-        _replay_best_episode(env, agent, best_actions, pcb_output_dir)
-    else:
-        logger.warning("[WARN] No actions recorded, skipping step images.")
+    # 4a. 导出 .kicad_pcb（唯一必要输出）
+    export_path = os.path.abspath(args.export) if args.export else \
+        os.path.join(pcb_output_dir, "best_layout.kicad_pcb")
+    logger.info(f"Exporting layout to: {export_path}")
+    env.kicad.export_layout(export_path, env.kicad.components)
 
-    # 4b. State JSON
-    json_path = os.path.join(pcb_output_dir, "best_layout_state.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "pcb_name": pcb_name,
-            "data_file": os.path.abspath(args.data),
-            "episode": best_episode,
-            "reward": best_reward,
-            "all_placed": all_completed,
-            "elapsed_seconds": round(elapsed, 2),
-            "total_attempts": best_episode if all_completed else MAX_ATTEMPTS,
-            **best_state,
-        }, f, indent=2, ensure_ascii=False)
-    logger.info(f"[FILE] State saved: {json_path}")
+    # ---- 以下为调试输出（仅在 --debug 时生成） ----
+    if args.debug:
+        # 重放最佳 episode 生成步骤图
+        if best_actions:
+            _replay_best_episode(env, agent, best_actions, pcb_output_dir)
+        else:
+            logger.warning("[WARN] No actions recorded, skipping step images.")
 
-    # 4c. 日志汇总
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Inference Summary")
-    logger.info(f"{'='*60}")
-    logger.info(f"  PCB name          : {pcb_name}")
-    logger.info(f"  Total attempts    : {best_episode if all_completed else MAX_ATTEMPTS}")
-    logger.info(f"  All placed        : {all_completed}")
-    logger.info(f"  Best episode      : {best_episode}")
-    logger.info(f"  Best reward       : {best_reward:.2f}")
-    logger.info(f"  Elapsed           : {elapsed:.2f}s")
-    logger.info(f"  Output directory  : {pcb_output_dir}")
+        # State JSON
+        json_path = os.path.join(pcb_output_dir, "best_layout_state.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "pcb_name": pcb_name,
+                "data_file": os.path.abspath(source_path),
+                "episode": best_episode,
+                "reward": best_reward,
+                "all_placed": all_completed,
+                "elapsed_seconds": round(elapsed, 2),
+                "total_attempts": best_episode if all_completed else MAX_ATTEMPTS,
+                **best_state,
+            }, f, indent=2, ensure_ascii=False)
+        logger.info(f"[FILE] State saved: {json_path}")
 
-    # 4d. 最终布局可视化
-    if best_state is not None:
-        from utils.visualization import draw_layout
+        # 最终布局可视化
+        if best_state is not None:
+            from utils.visualization import draw_layout
 
-        components_for_viz = _snapshot_to_viz_components(best_state)
-        board_bounds = (
-            (best_state["board_bounds"]["min_x"], best_state["board_bounds"]["min_y"]),
-            (best_state["board_bounds"]["max_x"], best_state["board_bounds"]["max_y"]),
-        )
-        title = (
-            f"Best Layout — {pcb_name}  Ep {best_episode}  "
-            f"Reward={best_reward:.0f}"
-        )
-        png_path = os.path.join(pcb_output_dir, "best_layout.png")
-        draw_layout(components_for_viz, board_bounds, png_path, title=title)
-        logger.info(f"[FILE] Layout visualization saved: {png_path}")
+            components_for_viz = _snapshot_to_viz_components(best_state)
+            board_bounds = (
+                (best_state["board_bounds"]["min_x"], best_state["board_bounds"]["min_y"]),
+                (best_state["board_bounds"]["max_x"], best_state["board_bounds"]["max_y"]),
+            )
+            title = (
+                f"Best Layout — {pcb_name}  Ep {best_episode}  "
+                f"Reward={best_reward:.0f}"
+            )
+            png_path = os.path.join(pcb_output_dir, "best_layout.png")
+            draw_layout(components_for_viz, board_bounds, png_path, title=title)
+            logger.info(f"[FILE] Layout visualization saved: {png_path}")
 
     logger.info(f"\n[OK] Inference demo finished. See output/{pcb_name}/ for results.")
 

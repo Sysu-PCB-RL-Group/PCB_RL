@@ -15,7 +15,7 @@ from typing import List, Tuple, Dict, Any, Optional
 
 KICAD_PATH = os.environ.get(
     "KICAD_PATH",
-    os.path.normpath(r"D:\Program Files\KiCad\9.0"),
+    os.path.normpath(r"D:\pcb大模型\kicad"),
 )
 
 KICAD_AVAILABLE = False
@@ -26,8 +26,8 @@ try:
     import pcbnew
     KICAD_AVAILABLE = True
 except (OSError, ImportError) as e:
-    print(f"⚠️  KiCad not available at {KICAD_PATH}: {e}")
-    print("   （Mock 模式仍可正常使用，训练前请设置 KICAD_PATH 环境变量）")
+    print(f"[WARN] KiCad not available at {KICAD_PATH}: {e}")
+    print("   (Mock mode still works; set KICAD_PATH env var before training)")
 
 # ===================== 数据结构定义 =====================
 
@@ -195,7 +195,7 @@ class KiCadUtils:
             )
 
             # 封装类型编码
-            footprint_name = fp.GetFPID().GetLibItemName()
+            footprint_name = str(fp.GetFPID().GetLibItemName())
             package_type = self._classify_package_type(footprint_name)
 
             # 引脚信息（相对 AABB 左下角）
@@ -390,20 +390,54 @@ class KiCadUtils:
     ) -> bool:
         """将 RL 优化后的布局导出为 KiCad PCB 文件。
 
-        遍历 components 字典，将每个非固定元件的 AABB 位置、旋转角度、
-        所在层通过 pcbnew API 写回 board 对象，最后 Save 到 output_path。
-        固定元件（is_fixed=True）保持模板中的原始位置不变。
+        从 self.board（缓存的完整 PCB）中找到对应 footprint，
+        只改位置/旋转/层，其余（走线、敷铜、丝印、3D 模型等）全部保留。
 
         Args:
             output_path: 输出 PCB 文件路径（.kicad_pcb 格式）
-            components: RL 优化后的元件数据，key 为参考编号
-            template_path: 模板 PCB 文件路径，None 则使用当前加载的 board
+            components: RL 优化后的元件数据 {ref: Component}
+            template_path: 模板路径，None 则使用 self.board
 
         Returns:
             True 导出成功，False 导出失败
         """
-        # TODO: 由 KiCad 同学实现
-        raise NotImplementedError("export_layout 待实现")
+        try:
+            board = self.board
+            if template_path is not None:
+                board = pcbnew.LoadBoard(template_path)
+                # 重新缓存 footprint，用于查找
+                self.footprints.clear()
+                for fp in board.Footprints():
+                    self.footprints[fp.GetReference()] = fp
+
+            for ref, comp in components.items():
+                if comp.is_fixed:
+                    continue
+                fp = self.footprints.get(ref)
+                if fp is None:
+                    continue
+
+                # AABB → 中心点坐标 (mm → nm)
+                cx = (comp.bbox[0] + comp.bbox[2]) / 2.0
+                cy = (comp.bbox[1] + comp.bbox[3]) / 2.0
+                fp.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(cx), pcbnew.FromMM(cy)
+                ))
+
+                # 旋转
+                fp.SetOrientationDegrees(float(comp.rotation * 90))
+
+                # 层
+                layer_name = "F.Cu" if comp.layer == 0 else "B.Cu"
+                fp.SetLayer(board.GetLayerID(layer_name))
+
+            board.Save(output_path)
+            print(f"[OK] Layout exported: {output_path}")
+            return True
+
+        except Exception as e:
+            print(f"[FAIL] Layout export error: {e}")
+            return False
 
     # -------------------- 辅助 --------------------
 

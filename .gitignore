@@ -23,9 +23,14 @@ venv/
 # Generated output (推理产物)
 output/
 
+# Training checkpoints
+*.pt
+
 # Test artifacts
 .pytest_cache/
-*.pt
+
+# PCB data（根据需要取消注释）
+# kicad-native-batch/
 
 # OS files
 .DS_Store

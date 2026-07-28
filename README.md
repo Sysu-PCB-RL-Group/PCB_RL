@@ -1,18 +1,23 @@
 # PCB_RL
 
-中山大学 PCBxRL 小组仓库 —— 基于强化学习的 PCB 自动布局与布线。
+基于强化学习的 PCB 自动布局系统。
 
 ## 目录结构
 
 ```
 PCB_RL/
-├── main.py                      # CLI 入口
+├── main.py                      # CLI 入口（训练入口）
 ├── run.py                       # 训练循环（自回归 5 步 DQN）
 ├── requirements.txt
 ├── config/
 │   └── argument.txt             # 超参数配置
+├── kicad-native-batch/          # 438 个立创 EDA KiCad 项目（实际数据集）
+│   └── <project_name>/          # 每个项目一个文件夹
+│       ├── *.kicad_pcb          # PCB 布局文件（RL 读取的数据源）
+│       ├── *.kicad_sch          # 原理图
+│       └── *.epro               # 立创 EDA 原生项目
 ├── data/
-│   ├── 模拟/                    # 合成 PCB JSON 数据（pcb_001~010.json）
+│   ├── 模拟/                    # 合成 PCB JSON 数据（旧版，用于无 KiCad 调试）
 │   └── README.txt
 ├── docs/                        # 文档 & SPEC
 ├── dqn/                         # DQN 模块
@@ -23,149 +28,95 @@ PCB_RL/
 │   ├── pcb_layout_env.py        # Gymnasium Env（自回归 5 步）
 │   ├── pcb_utils.py             # 约束检测 & Reward 计算
 │   └── mock_pcb.py              # Mock 合成数据（无需 KiCad）
-├── scripts/                     # 工具脚本
-│   ├── run_inference.py         # 纯推理 Demo → 步骤图 + 布局图
-│   ├── generate_mock_pcbs.py    # 合成 PCB JSON 生成器
-│   └── fix_board_bounds.py      # 板框修复工具
+├── scripts/
+│   ├── run_inference.py         # 推理脚本（支持 --pcb 和 --data 两种输入）
+│   ├── generate_mock_pcbs.py    # 合成 PCB JSON 生成器（旧版）
+│   └── fix_board_bounds.py      # 板框修复工具（旧版）
 ├── utils/                       # 工具模块
-│   ├── kicad_utils/             # KiCad 解析工具（由独立同学维护）
+│   ├── kicad_utils/             # KiCad 解析 + 导出工具
 │   └── visualization.py         # matplotlib 布局可视化
-├── tests/                        # 测试套件（69 用例，pytest）
-│   ├── conftest.py               # 共享 fixture（Mock 注入 + env 工厂）
+├── tests/                        # 测试套件（69 用例）
+│   ├── conftest.py               # 共享 fixture
 │   ├── test_dqn_pipeline.py      # DQN 全管线集成测试（20 ep）
 │   ├── test_pcb_utils.py         # 约束检测单测（26 用例）
 │   ├── test_env.py               # PCBLayoutEnv 单测（14 用例）
 │   ├── test_mock_pcb.py          # MockPCB 单测（13 用例）
 │   ├── test_network.py           # DQN 网络单测（7 用例）
 │   └── test_replay_buffer.py     # ReplayBuffer 单测（8 用例）
-└── output/                      # 推理输出（自动生成）
+└── output/                      # 推理输出
     └── <pcb_name>/              # 每块 PCB 一个文件夹
-        ├── step_01.png          # 中间步骤图
-        ├── best_layout.png      # 最佳布局图
-        ├── best_layout_state.json
-        └── inference_log.txt
+        └── best_layout.kicad_pcb  # 布局优化后的 PCB 文件
 ```
 
 ## 依赖
 
-- Python 3.10+
+- **KiCad 10.0+**（必装，用于解析 .kicad_pcb）
+- Python 3.11+（需与 KiCad 内置 Python 版本匹配）
 - PyTorch + Gymnasium + NumPy + Matplotlib
-- pytest（测试框架）
-- KiCad 9.0+（训练需 PCB 文件，推理验证和测试不需要）
+- 设置环境变量 `KICAD_PATH` 指向 KiCad 安装目录
 - 见 `requirements.txt`
 
-## 文档
+## 数据
 
-`docs/` 目录包含项目约束体系与工程规格，阅读顺序：
+`kicad-native-batch/` 目录下每个项目含：
+- 元件列表（参考编号、封装尺寸、引脚、位置、旋转、层）
+- 网络连接（网络名、连接关系）
+- 板框（Edge.Cuts 层）
+- 已有走线 + 敷铜（导出时全部保留）
 
-| 文件 | 用途 |
-|------|------|
-| `PCB全部约束清单.md` | 背景调研：80+ 条 PCB 布局约束 |
-| `PCB核心约束清单.md` | 核心约束 C0-C6 及伪代码 |
-| `环境构建约束.md` | 施工版最终方案 |
-| `SPEC.md` | **项目唯一技术标准**，所有代码实现以此为据 |
-| `kicad_interface.md` | KiCad 模块接口契约 |
-| `核心重构.md` | DQN 自回归架构重构记录 |
-
-## 快速验证（无需 KiCad）
-
-以下命令不依赖 KiCad，可直接运行。
-
-### 运行全部测试（一键）
+## 推理
 
 ```bash
-python -m pytest tests/ -v
-```
+# 设置 KiCad 路径（或已配置 KICAD_PATH 环境变量则跳过）
+export KICAD_PATH="/path/to/kicad"
 
-69 个用例，覆盖 env 约束检测、DQN 组件、Mock 数据、全管线集成。
+# 从真实 .kicad_pcb 加载（推荐）
+python scripts/run_inference.py --pcb path/to/your.kicad_pcb
 
-### 按模块测试
+# 输出调试文件（步骤图 + 布局图 + JSON）：加 --debug
+python scripts/run_inference.py --pcb path/to/your.kicad_pcb --debug
 
-```bash
-python -m pytest tests/test_pcb_utils.py -v    # 约束检测（26 用例）
-python -m pytest tests/test_env.py -v           # 环境行为（14 用例）
-python -m pytest tests/test_mock_pcb.py -v      # Mock 数据（13 用例）
-python -m pytest tests/test_network.py -v       # DQN 网络（7 用例）
-python -m pytest tests/test_replay_buffer.py -v # 回放缓冲（8 用例）
-```
-
-### DQN 模块快速验证
-
-```bash
-# DQN 网络 forward（5 个 Head 输出 shape 检查）
-python -c "
-from dqn.network import DQN
-import torch
-net = DQN(obs_dim=504, n_movable=50, grid_w=100, grid_h=80)
-x = torch.randn(3, 504)
-for sid in range(5): print(f'head {sid}: {list(net(x, sid).shape)}')
-"
-# 期望: head 0: [3, 50] | head 1: [3, 100] | head 2: [3, 80] | head 3: [3, 4] | head 4: [3, 2]
-
-# ReplayBuffer 读写
-python -c "
-from dqn.replay_buffer import ReplayBuffer
-import numpy as np
-buf = ReplayBuffer(capacity=100)
-obs = np.zeros(504, dtype=np.float32)
-for i in range(20):
-    sid = i % 5
-    buf.add(obs, i, 1.0 if sid==4 else 0.0, obs, np.ones(50,dtype=bool), False, sid, sid+1 if sid<4 else 0)
-b = buf.sample(8)
-print(f'obs={b[0].shape}, act={b[1].shape}, next_sid={b[7].shape}')
-"
-# 期望: obs=(8, 504), act=(8,), next_sid=(8,)
-
-# Agent learn 完整管线
-python -c "
-from dqn.agent import DQNAgent
-from dqn.replay_buffer import ReplayBuffer
-import numpy as np, torch
-agent = DQNAgent(obs_dim=504, n_movable=50, grid_w=100, grid_h=80, device=torch.device('cpu'))
-buf = ReplayBuffer(capacity=100)
-obs = np.random.randn(504).astype(np.float32)
-for sid in range(5):
-    buf.add(obs, sid%2, 10.0 if sid==4 else 0.0, obs, np.ones(50,dtype=bool), False, sid, sid+1 if sid<4 else 0)
-buf.add(obs, 0, -5.0, obs, np.ones(50,dtype=bool), True, 4, -1)
-loss = agent.learn(buf.sample(6))
-agent.sync_target()
-print(f'loss={loss:.4f}, train_steps={agent.train_steps}')
-"
-# 期望: loss 非 NaN, train_steps=1
-```
-
-### 纯推理 Demo（输出步骤图 + 布局图）
-
-```bash
-# 加载 JSON 数据文件，输出到 output/<pcb_name>/
+# 从 JSON mock 数据加载（无需 KiCad）
 python scripts/run_inference.py --data data/模拟/pcb_001.json
 ```
 
-无训练（epsilon=0，随机 DQN 权重），反复尝试放置全部元件。
 输出到 `output/<pcb_name>/`：
 
-- `step_01.png` ~ `step_N.png` — 每放置一个元件的中间截图
-- `best_layout.png` — 最佳 episode 的最终布局图
-- `best_layout_state.json` — 完整元件状态（供下游消费）
-- `inference_log.txt` — 运行日志
-
-> **注意**：随机权重下通常只能放置部分元件（因为未训练，模型不会选好位置）。
-> 训练收敛后再跑推理才能看到完整布局。
+| 文件 | 说明 | 默认生成 |
+|:---|:---|:---:|
+| `best_layout.kicad_pcb` | 优化后的 PCB 文件（走线/敷铜全部保留） | ✅ |
+| `step_01~N.png` | 每步放置过程图 | `--debug` 时 |
+| `best_layout.png` | 最终布局可视化 | `--debug` 时 |
+| `best_layout_state.json` | 布局状态快照 | `--debug` 时 |
 
 ## 训练
 
 ```bash
 pip install -r requirements.txt
+export KICAD_PATH="/path/to/kicad"
 
-# 基本训练
+# 训练 kicad-native-batch/ 下所有 PCB
 python main.py --task_name my_task
 
-# 自定义参数
+# 指定训练某块板
 python main.py \
+  --data_dir kicad-native-batch/<project> \
   --total_episodes 5000 \
-  --max_episode_step 100 \
-  --device cuda \
   --save_dir ./result
 ```
 
-超参数通过 `config/argument.txt` 管理，CLI 参数可覆盖文件中的值。
+输出 `./result/<pcb_name>_ep<编号>.pt` 模型权重。
+
+## 训练流程说明
+
+- 每块 PCB 独立训练一个 DQN 模型（因为每块板元件数不同）
+- ε-greedy 探索从 1.0 衰减到 0.01
+- Replay buffer 64 batch / 10000 容量
+- 每步训练后自动学习，不等待 episode 结束
+
+## 导出机制
+
+训练/推理后通过 `export_layout()` 导出：
+1. 从缓存的全量 board 中找到对应 footprint
+2. 只改位置/旋转/层（原有走线、敷铜、丝印、3D 模型全部保留）
+3. 输出新的 .kicad_pcb 文件

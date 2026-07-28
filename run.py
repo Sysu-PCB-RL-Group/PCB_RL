@@ -280,7 +280,10 @@ class Runner:
         return PCBLayoutEnv(pcb_path, config_path=config_path)
 
     def _get_pcb_files(self) -> list:
-        """扫描数据目录获取所有 PCB 文件。
+        """递归扫描数据目录获取所有 PCB 文件。
+
+        每个 KiCad 项目在独立子目录中，递归搜索。
+        过滤掉名称含 测试/test/_step/_export 的衍生文件。
 
         Returns:
             排序后的 PCB 文件绝对路径列表
@@ -288,9 +291,14 @@ class Runner:
         files = []
         if not os.path.isdir(self.data_dir):
             return files
-        for f in os.listdir(self.data_dir):
-            if f.lower().endswith((".kicad_pcb", ".pcb")):
-                files.append(os.path.join(self.data_dir, f))
+        for root, dirs, fnames in os.walk(self.data_dir):
+            for f in fnames:
+                if not f.lower().endswith((".kicad_pcb", ".pcb")):
+                    continue
+                # 过滤衍生文件
+                if any(kw in f for kw in ("测试", "test", "_step", "_export", "_manual", "_roundtrip")):
+                    continue
+                files.append(os.path.join(root, f))
         return sorted(files)
 
     def _log_episode(
