@@ -11,11 +11,11 @@ PCB_RL/
 ├── requirements.txt
 ├── config/
 │   └── argument.txt             # 超参数配置
-├── kicad-native-batch/          # 438 个立创 EDA KiCad 项目（实际数据集）
-│   └── <project_name>/          # 每个项目一个文件夹
+├── kicad-native-batch/          # 立创 EDA KiCad 项目（当前仅使用开关小板）
+│   └── ran-pang-airlink-.../    # 开关小板（唯一训练/推理数据）
 │       ├── *.kicad_pcb          # PCB 布局文件（RL 读取的数据源）
 │       ├── *.kicad_sch          # 原理图
-│       └── *.epro               # 立创 EDA 原生项目
+│       └── *.kicad_pro          # KiCad 项目文件
 ├── data/
 │   ├── 模拟/                    # 合成 PCB JSON 数据（旧版，用于无 KiCad 调试）
 │   └── README.txt
@@ -63,7 +63,9 @@ PCB_RL/
 
 ## 数据
 
-`kicad-native-batch/` 目录下每个项目含：
+**当前仅使用开关小板**（`ran-pang-airlink-86231b34--开关小板-883285b3`）作为训练/推理数据，以简化迭代。
+
+该 PCB 包含：
 - 元件列表（参考编号、封装尺寸、引脚、位置、旋转、层）
 - 网络连接（网络名、连接关系）
 - 板框（Edge.Cuts 层）
@@ -71,27 +73,26 @@ PCB_RL/
 
 ## 推理
 
-**前置条件**：设置 `KICAD_PATH` 环境变量指向 KiCad 安装目录（mock 模式不需要）。
+**前置条件**：设置 `KICAD_PATH` 环境变量指向 KiCad 安装目录。
+
+默认使用开关小板，无需指定 PCB 路径：
 
 **Windows (PowerShell)：**
 
 ```powershell
 $env:KICAD_PATH = "E:\Kicad"
 
-# 从真实 .kicad_pcb 加载（推荐）
-python scripts/run_inference.py --pcb kicad-native-batch/<项目>/xxx.kicad_pcb
+# 默认推理开关小板（无需 --pcb）
+python scripts/run_inference.py
 
 # 加载训练好的模型权重
-python scripts/run_inference.py --pcb kicad-native-batch/<项目>/xxx.kicad_pcb --model result/xxx_ep5000.pt
+python scripts/run_inference.py --model result/xxx_ep5000.pt
 
 # 加 --debug 输出步骤图 + 布局图 + JSON
-python scripts/run_inference.py --pcb kicad-native-batch/<项目>/xxx.kicad_pcb --debug
+python scripts/run_inference.py --debug
 
 # 限制搜索轮数（默认 500 轮）
-python scripts/run_inference.py --pcb kicad-native-batch/<项目>/xxx.kicad_pcb --max-attempts 50
-
-# 从 JSON mock 数据加载（无需 KiCad）
-python scripts/run_inference.py --data data/模拟/pcb_001.json
+python scripts/run_inference.py --max-attempts 50
 ```
 
 **macOS / Linux (bash)：**
@@ -99,20 +100,14 @@ python scripts/run_inference.py --data data/模拟/pcb_001.json
 ```bash
 export KICAD_PATH="/path/to/kicad"
 
-# 从真实 .kicad_pcb 加载（推荐）
-python scripts/run_inference.py --pcb path/to/your.kicad_pcb
+# 默认推理开关小板
+python scripts/run_inference.py
 
 # 加载训练好的模型权重
-python scripts/run_inference.py --pcb path/to/your.kicad_pcb --model result/xxx_ep5000.pt
+python scripts/run_inference.py --model result/xxx_ep5000.pt
 
-# 加 --debug 输出步骤图 + 布局图 + JSON
-python scripts/run_inference.py --pcb path/to/your.kicad_pcb --debug
-
-# 限制搜索轮数
-python scripts/run_inference.py --pcb path/to/your.kicad_pcb --max-attempts 50
-
-# 从 JSON mock 数据加载（无需 KiCad）
-python scripts/run_inference.py --data data/模拟/pcb_001.json
+# 加 --debug
+python scripts/run_inference.py --debug
 ```
 
 输出到 `output/<pcb_name>/`：
@@ -130,16 +125,18 @@ python scripts/run_inference.py --data data/模拟/pcb_001.json
 pip install -r requirements.txt
 ```
 
+默认训练开关小板，10000 episode，无需指定路径：
+
 **Windows (PowerShell)：**
 
 ```powershell
 $env:KICAD_PATH = "E:\Kicad"
 
-# 训练 kicad-native-batch/ 下所有 PCB
-python main.py --task_name my_task
+# 默认训练开关小板
+python main.py
 
-# 指定训练某块板
-python main.py --data_dir kicad-native-batch/<project> --total_episodes 5000 --save_dir ./result
+# 指定训练轮数
+python main.py --total_episodes 5000
 ```
 
 **macOS / Linux (bash)：**
@@ -147,11 +144,11 @@ python main.py --data_dir kicad-native-batch/<project> --total_episodes 5000 --s
 ```bash
 export KICAD_PATH="/path/to/kicad"
 
-# 训练 kicad-native-batch/ 下所有 PCB
-python main.py --task_name my_task
+# 默认训练开关小板
+python main.py
 
-# 指定训练某块板
-python main.py --data_dir kicad-native-batch/<project> --total_episodes 5000 --save_dir ./result
+# 指定训练轮数
+python main.py --total_episodes 5000
 ```
 
 输出 `./result/<pcb_name>_ep<编号>.pt` 模型权重，推理时通过 `--model` 加载。
@@ -169,8 +166,8 @@ python main.py --data_dir kicad-native-batch/<project> --total_episodes 5000 --s
 
 ## 训练流程说明
 
-- 每块 PCB 独立训练一个 DQN 模型（因为每块板元件数不同）
-- ε-greedy 探索从 1.0 衰减到 0.01
+- 当前仅对开关小板训练，episode 0~1999 仅使用精简版 reward（惩罚+完成奖励），2000~3999 品质项线性升温，4000+ 完整版 reward
+- ε-greedy 探索从 1.0 指数衰减到 0.05
 - Replay buffer 64 batch / 100000 容量
 - 每步训练后自动学习，不等待 episode 结束
 

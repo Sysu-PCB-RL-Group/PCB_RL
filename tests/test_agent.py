@@ -79,6 +79,28 @@ def test_select_action_epsilon_exploration():
         assert action in (1, 3), f"Exploration selected illegal action {action}"
 
 
+def test_select_action_no_mask_exploit():
+    """mask=None 时利用模式返回合法范围动作（全空间 argmax）。"""
+    agent = _make_agent(obs_dim=50, n_movable=5)
+    obs = np.random.randn(50).astype(np.float32)
+    action = agent.select_action(obs, None, step_id=0, epsilon=0.0)
+    assert 0 <= action < 5, f"Action {action} out of range [0, 4]"
+
+
+def test_select_action_no_mask_explore():
+    """mask=None 时探索模式在合法范围随机。"""
+    agent = _make_agent(n_movable=5, obs_dim=50)
+    obs = np.random.randn(50).astype(np.float32)
+    actions = set()
+    for _ in range(50):
+        a = agent.select_action(obs, None, step_id=0, epsilon=1.0)
+        actions.add(a)
+    assert len(actions) > 1, "Should explore multiple actions"
+    # 所有动作在合法范围
+    for a in actions:
+        assert 0 <= a < 5
+
+
 # ==================== learn ====================
 
 
@@ -131,6 +153,28 @@ def test_learn_next_step_id_routing():
     batch = buffer.sample(6)
     loss = agent.learn(batch)
     assert not np.isnan(loss)
+
+
+def test_learn_target_mask_placed_component():
+    """next_step_id=0 时，已放置元件的 Q 值被掩码屏蔽（不选虚高 Q）。"""
+    agent = _make_agent(obs_dim=50, n_movable=5)
+    buffer = ReplayBuffer(capacity=100)
+    obs = np.random.randn(50).astype(np.float32)
+
+    # 构造 next_obs：元件 0 已放置 (placed_flag=1.0)
+    next_obs = obs.copy()
+    next_obs[0] = 1.0  # slot 0 的 placed_flag
+
+    # 当前 step_id=4 → 下个状态 next_step_id=0（选新元件）
+    buffer.add(obs, 0, 0.0, next_obs, np.ones(5, dtype=bool), False, 4, 0)
+
+    # 确保 buffer 有足够样本
+    for _ in range(4):
+        buffer.add(obs, 0, 0.0, obs, np.ones(5, dtype=bool), False, 0, 1)
+
+    batch = buffer.sample(5)
+    loss = agent.learn(batch)
+    assert not np.isnan(loss), "Target mask should not cause NaN loss"
 
 
 # ==================== sync_target ====================

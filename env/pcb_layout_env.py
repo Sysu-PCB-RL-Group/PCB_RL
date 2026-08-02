@@ -20,15 +20,19 @@ logger = logging.getLogger(__name__)
 class Config:
     """默认配置常量"""
     # Reward 权重
-    W_OVERLAP_HARD: float = 1000.0
+    W_OVERLAP_HARD: float = 100.0
     W_OVERLAP_SOFT: float = 50.0
-    W_OUT_OF_BOUNDS_INITIAL: float = 100.0
-    W_OUT_OF_BOUNDS_FINAL: float = 1000.0
-    W_NET_AGGREGATION: float = 1.0
-    W_CONGESTION: float = 1.0
-    W_DECOUPLING: float = 1.0
-    W_LARGE_COMP: float = 1.0
-    W_COMPLETION: float = 500.0
+    W_OUT_OF_BOUNDS_INITIAL: float = 10.0
+    W_OUT_OF_BOUNDS_FINAL: float = 100.0
+    W_NET_AGGREGATION: float = 10.0
+    W_CONGESTION: float = 5.0
+    W_DECOUPLING: float = 10.0
+    W_LARGE_COMP: float = 5.0
+    W_COMPLETION: float = 200.0
+
+    # Reward Shaping：品质项时序控制
+    QUALITY_START_EP: int = 10000
+    QUALITY_RAMP_EP: int = 2000
 
     # 训练参数
     GAMMA: float = 0.99
@@ -36,10 +40,9 @@ class Config:
     TOTAL_EPISODES: int = 10000
     SAVE_INTERVAL: int = 500
     LOG_INTERVAL: int = 100
-    EARLY_STOP_THRESHOLD: float = -500.0
+    EARLY_STOP_THRESHOLD: float = -1000.0
     EPSILON_START: float = 1.0
-    EPSILON_END: float = 0.01
-    EPSILON_DECAY_EPISODES: int = 10000
+    EPSILON_MIN: float = 0.05
     CURRICULUM_START_EP: int = 0
     CURRICULUM_END_EP: int = 500
 
@@ -176,6 +179,7 @@ class PCBLayoutEnv(gym.Env):
 
         # 训练动态参数
         self.W_OUT_OF_BOUNDS_CURRENT = Config.W_OUT_OF_BOUNDS_INITIAL
+        self.current_episode: int = 0  # 由 run.py 每 episode 设置
 
         # 内部状态（reset 时初始化）
         self.placed_list: List[str] = []
@@ -500,20 +504,17 @@ class PCBLayoutEnv(gym.Env):
 
         return np.concatenate([raw_obs, pending_comp, pending_others])
 
-    def _build_mask_for_step(self, step_id: int) -> np.ndarray:
+    def _build_mask_for_step(self, step_id: int) -> Optional[np.ndarray]:
         """为指定子步骤构建 1D bool 动作掩码。
 
-        Step 0 (comp): 已放置/固定 → mask=False
-        Step 1 (x1): 超出右边界 → mask=False
-        Step 2 (y1): 超出上边界 → mask=False
-        Step 3 (rot): 全 True
-        Step 4 (lay): 全 True
+        Step 0 (comp): 已放置/固定 → mask=False（硬规则，Agent 不可选）
+        Step 1~4: 无掩码，Agent 自行从 reward 学会避开出界/选合适旋转层
 
         Args:
             step_id: 子步骤编号 0-4
 
         Returns:
-            1D bool 向量，合法动作为 True
+            step 0: 1D bool 向量 (N_movable,)；step 1~4: None
         """
         if step_id == 0:
             # 元件选择掩码: 已放置/固定不可选
@@ -523,44 +524,29 @@ class PCBLayoutEnv(gym.Env):
                     mask[i] = False
             return mask
 
-        elif step_id == 1:
-            # x1 掩码: 需已知选中的元件
-            if self._pending_comp_idx < 0:
-                return np.zeros(self.grid_width, dtype=bool)
-            comp = self.movable_list[self._pending_comp_idx]
-            expected_w = max(1, int(comp.footprint_w / Config.CELL_SIZE))
-            mask = np.ones(self.grid_width, dtype=bool)
-            for gx1 in range(self.grid_width):
-                gx2 = gx1 + expected_w
-                x1_mm = self.valid_area[0] + gx1 * Config.CELL_SIZE
-                if gx2 >= self.grid_width or x1_mm + comp.footprint_w > self.valid_area[2]:
-                    mask[gx1] = False
-            return mask
+        # step 1~4: 无掩码
+        return None
 
-        elif step_id == 2:
-            # y1 掩码: 需已知选中的元件
-            if self._pending_comp_idx < 0:
-                return np.zeros(self.grid_height, dtype=bool)
-            comp = self.movable_list[self._pending_comp_idx]
-            expected_h = max(1, int(comp.footprint_h / Config.CELL_SIZE))
-            mask = np.ones(self.grid_height, dtype=bool)
-            for gy1 in range(self.grid_height):
-                gy2 = gy1 + expected_h
-                y1_mm = self.valid_area[1] + gy1 * Config.CELL_SIZE
-                if gy2 >= self.grid_height or y1_mm + comp.footprint_h > self.valid_area[3]:
-                    mask[gy1] = False
-            return mask
+    def _get_quality_scale(self) -> float:
+        """品质项权重缩放系数，基于 current_episode 线性升温。
 
-        elif step_id == 3:
-            # 旋转: 无掩码
-            return np.ones(4, dtype=bool)
+        Episode < QUALITY_START_EP                 → 0.0（纯精简版 reward）
+        Episode in [START, START+RAMP]              → 0.0→1.0 线性
+        Episode >= QUALITY_START_EP + QUALITY_RAMP_EP → 1.0（完整版 reward）
 
-        elif step_id == 4:
-            # 层: 无掩码
-            return np.ones(2, dtype=bool)
+        Returns:
+            quality_scale ∈ [0.0, 1.0]
+        """
+        start = Config.QUALITY_START_EP
+        ramp = max(Config.QUALITY_RAMP_EP, 1)
+        # getattr 兼容 mock env：mock 绕过 __init__ 不会设置 current_episode，回退到 0
+        ep = getattr(self, "current_episode", 0)
 
-        else:
-            raise ValueError(f"Invalid step_id: {step_id}, must be 0-4")
+        if ep < start:
+            return 0.0
+        if ep >= start + ramp:
+            return 1.0
+        return (ep - start) / ramp
 
     def _calculate_reward(
         self,
@@ -570,10 +556,11 @@ class PCBLayoutEnv(gym.Env):
         total_out_of_bounds: float,
         has_violations: bool,
     ) -> float:
-        """计算完整 6 项 reward。
+        """计算 reward。
 
-        惩罚项：硬重叠 + 软间距 + 出界。
-        奖励项：Net 聚合度 + 拥塞均衡度 + 去耦电容距离 + 大元件排名 + 完成奖励。
+        惩罚项（始终生效）：硬重叠 + 软间距 + 出界。
+        基础奖励（始终生效）：完成奖励。
+        品质奖励（quality_scale 升温控制）：Net 聚合度 + 拥塞均衡度 + 去耦电容 + 大元件排名。
 
         Args:
             component: 当前放置的元件
@@ -585,10 +572,11 @@ class PCBLayoutEnv(gym.Env):
         Returns:
             标量 reward 值
         """
+        quality_scale = self._get_quality_scale()
         reward = 0.0
         breakdown = {}
 
-        # ========== 惩罚项 ==========
+        # ========== 惩罚项（始终生效） ==========
 
         # 硬重叠
         penalty_hard = Config.W_OVERLAP_HARD * total_hard_overlap
@@ -605,7 +593,7 @@ class PCBLayoutEnv(gym.Env):
         reward -= penalty_oob
         breakdown["out_of_bounds"] = -penalty_oob
 
-        # ========== 奖励项 ==========
+        # ========== 品质奖励（quality_scale 升温控制） ==========
 
         # Net 聚合度
         agg_reward = 0.0
@@ -621,8 +609,8 @@ class PCBLayoutEnv(gym.Env):
                 agg = PCBUtils.net_aggregation(comp_bboxes)
                 agg_score = max(0.0, 1.0 - agg / max(self.board_diagonal, 0.01))
                 agg_reward += agg_score * Config.W_NET_AGGREGATION
-        reward += agg_reward
-        breakdown["net_aggregation"] = agg_reward
+        reward += agg_reward * quality_scale
+        breakdown["net_aggregation"] = agg_reward * quality_scale
 
         # 拥塞均衡度
         placed_comps = [self.kicad.components[rid] for rid in self.placed_list]
@@ -632,12 +620,11 @@ class PCBLayoutEnv(gym.Env):
             placed_comps, self.nets, self.valid_area,
             Config.CONGESTION_CELL_SIZE
         )
-        # 归一化：MAX_CONGESTION_STD 设为 sqrt(N_movable) 作为上界参考
         max_std = max(1.0, np.sqrt(self.N_movable))
         cong_score = max(0.0, 1.0 - cong_std / max_std)
         cong_reward = cong_score * Config.W_CONGESTION
-        reward += cong_reward
-        breakdown["congestion"] = cong_reward
+        reward += cong_reward * quality_scale
+        breakdown["congestion"] = cong_reward * quality_scale
 
         # 去耦电容距离
         decap_reward = 0.0
@@ -653,29 +640,30 @@ class PCBLayoutEnv(gym.Env):
                         ) * Config.W_DECOUPLING
                         if dist > Config.DECOUPLING_MAX_DIST:
                             decap_violations += 1
-        reward += decap_reward
-        breakdown["decoupling"] = decap_reward
+        reward += decap_reward * quality_scale
+        breakdown["decoupling"] = decap_reward * quality_scale
         breakdown["decoupling_violations"] = decap_violations
 
         # 大元件排名
+        large_comp_reward = 0.0
         if component.id in self.area_ranks:
             rank = self.area_ranks[component.id]
             large_comp_reward = max(0.0, 1.0 - rank / self.N_movable) * Config.W_LARGE_COMP
-            reward += large_comp_reward
-            breakdown["large_comp"] = large_comp_reward
+        reward += large_comp_reward * quality_scale
+        breakdown["large_comp"] = large_comp_reward * quality_scale
 
-        # 完成奖励
+        # ========== 完成奖励（始终生效） ==========
+
         if not has_violations:
-            # 每放一个给一小部分
             completion_partial = Config.W_COMPLETION / max(self.N_movable, 1)
             reward += completion_partial
             breakdown["completion_partial"] = completion_partial
             if len(self.placed_list) + 1 == self.N_movable:
-                # 最后一个：额外给剩余部分
                 completion_bonus = Config.W_COMPLETION - completion_partial * self.N_movable
                 reward += completion_bonus
                 breakdown["completion_full"] = completion_bonus
 
+        breakdown["quality_scale"] = quality_scale
         self._last_reward_breakdown = breakdown
         return reward
 

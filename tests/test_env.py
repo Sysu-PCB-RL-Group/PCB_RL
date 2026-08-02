@@ -155,18 +155,18 @@ def test_mask_step0_all_available():
     assert mask.sum() == env.N_movable
 
 
-def test_mask_step1_grid_size():
-    """step 1 的 x1 掩码长度 = grid_width。"""
+def test_mask_step1_none():
+    """step 1 不再需要掩码，返回 None。"""
     env = create_patched_env()
     mask = env._build_mask_for_step(1)
-    assert len(mask) == env.grid_width
+    assert mask is None
 
 
-def test_mask_step2_grid_size():
-    """step 2 的 y1 掩码长度 = grid_height。"""
+def test_mask_step2_none():
+    """step 2 不再需要掩码，返回 None。"""
     env = create_patched_env()
     mask = env._build_mask_for_step(2)
-    assert len(mask) == env.grid_height
+    assert mask is None
 
 
 # ==================== reward ====================
@@ -314,7 +314,7 @@ def test_early_stop_on_low_reward():
         )
     finally:
         Config.EARLY_STOP_THRESHOLD = old_threshold
-        Config.W_OVERLAP_HARD = 1000.0
+        Config.W_OVERLAP_HARD = 100.0
 
 
 def test_action_space_on_mock_env():

@@ -181,8 +181,12 @@ def run_inference_episode(
         (episode_reward, step_count, placed_count, action_history)
         action_history: [(comp_id, gx1, gy1, rot, lay), ...]
     """
+    from env.pcb_layout_env import Config
+
     env.reset()
     env._reset_pending()
+    env.current_episode = 99999  # 推理时使用完整版 reward（quality_scale=1.0）
+    Config.EARLY_STOP_THRESHOLD = float("-inf")  # 推理不早停：必定放完所有元件
     done = False
     episode_reward = 0.0
     step_count = 0
@@ -192,7 +196,8 @@ def run_inference_episode(
     while not done:
         # ---- 5 步自回归（纯推理：epsilon=0） ----
         for step_id in range(5):
-            mask = env._build_mask_for_step(step_id)
+            # 仅 step 0 需要掩码（筛选已放置元件）
+            mask = env._build_mask_for_step(step_id) if step_id == 0 else None
             obs = env._get_obs_with_pending(step_id)
             action = agent.select_action(obs, mask, step_id, epsilon=0.0)
             env._update_pending(action, step_id)
@@ -306,8 +311,13 @@ def main():
         help="PCB JSON 数据文件 (e.g. data/模拟/pcb_001.json).",
     )
     parser.add_argument(
-        "--pcb", type=str, default=None,
-        help=".kicad_pcb 文件路径 (从真实 KiCad 项目加载).",
+        "--pcb", type=str,
+        default=os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "kicad-native-batch",
+            "ran-pang-airlink-86231b34--开关小板-883285b3",
+            "ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb",
+        )),
+        help=".kicad_pcb 文件路径 (默认：开关小板).",
     )
     parser.add_argument(
         "--export", type=str, default=None,
@@ -327,10 +337,7 @@ def main():
     )
     args = parser.parse_args()
 
-    if not args.data and not args.pcb:
-        parser.error("必须指定 --data 或 --pcb")
-
-    # ---- 加载数据（两种路径） ----
+    # ---- 加载数据 ----
     if args.data:
         # JSON mock 路径：注入 mock KiCad
         _m = mock.MagicMock()
@@ -360,8 +367,14 @@ def main():
 
     Config = _C
 
-    # ---- 创建输出目录 ----
+    # ---- 清理同板框旧 output ----
     pcb_output_dir = os.path.join(OUTPUT_DIR, pcb_name)
+    if os.path.isdir(pcb_output_dir):
+        import shutil
+        shutil.rmtree(pcb_output_dir)
+        logger.info(f"Cleaned old output: {pcb_output_dir}")
+
+    # ---- 创建输出目录 ----
     os.makedirs(pcb_output_dir, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 

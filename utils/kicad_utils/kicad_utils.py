@@ -152,11 +152,28 @@ class KiCadUtils:
         """缓存所有 footprint 对象。
 
         遍历 board.Footprints()，以参考编号为 key 存入 self.footprints 字典。
+        EasyEDA 转换文件 Reference 可能为空，此时用库项名兜底并去重。
+        同时存一份按遍历顺序的 ref 列表，供 _cache_nets 索引匹配。
         """
         self.footprints.clear()
+        self._fp_refs = []  # 按遍历顺序保存修正后的 ref
+        counter = 0
         for fp in self.board.Footprints():
             ref = fp.GetReference()
+            if not ref:
+                # EasyEDA 转换文件 Reference 为空 → 用库项名兜底
+                try:
+                    ref = str(fp.GetFPID().GetLibItemName())
+                except Exception:
+                    counter += 1
+                    ref = f"UNK_{counter}"
+            # 确保唯一（多个同型号元件 LibraryItemName 可能重复）
+            base = ref
+            while ref in self.footprints:
+                counter += 1
+                ref = f"{base}_{counter}"
             self.footprints[ref] = fp
+            self._fp_refs.append(ref)
 
     def _cache_components(self):
         """缓存所有元器件信息（AABB-based，含封装类型编码）。
@@ -166,7 +183,7 @@ class KiCadUtils:
         固定元件（is_fixed=True）初始 is_placed 也设为 True。
         """
         for ref, fp in self.footprints.items():
-            reference = fp.GetReference()
+            reference = ref  # 直接使用 dict key（由 _cache_footprints 确保唯一）
 
             # 基础信息
             pos_nm = fp.GetPosition()
@@ -268,10 +285,11 @@ class KiCadUtils:
 
             connections = []
             target_net_code = net.GetNetCode()
-            for footprint in self.board.Footprints():
+            for idx, footprint in enumerate(self.board.Footprints()):
+                # 使用 _cache_footprints 修正后的 ref，而非原始的 fp.GetReference()
+                ref = self._fp_refs[idx] if idx < len(self._fp_refs) else footprint.GetReference()
                 for pad in footprint.Pads():
                     if pad.GetNetCode() == target_net_code:
-                        ref = footprint.GetReference()
                         connections.append((ref, pad.GetNumber()))
                         net_map.setdefault(net_name, [])
                         if ref not in net_map[net_name]:

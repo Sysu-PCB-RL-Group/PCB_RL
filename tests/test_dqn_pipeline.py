@@ -62,7 +62,8 @@ def run_episode(env, agent: DQNAgent, buffer: ReplayBuffer,
         # ---- 5 步自回归 ----
         transitions = []
         for step_id in range(5):
-            mask = env._build_mask_for_step(step_id)
+            # 仅 step 0 需要掩码（筛选已放置元件）
+            mask = env._build_mask_for_step(step_id) if step_id == 0 else None
             obs = env._get_obs_with_pending(step_id)
             action = agent.select_action(obs, mask, step_id, epsilon)
             env._update_pending(action, step_id)

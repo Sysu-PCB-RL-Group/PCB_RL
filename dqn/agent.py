@@ -64,7 +64,7 @@ class DQNAgent:
     def select_action(
         self,
         obs: np.ndarray,
-        mask: np.ndarray,
+        mask: Optional[np.ndarray],
         step_id: int,
         epsilon: float = 0.0,
     ) -> int:
@@ -72,13 +72,27 @@ class DQNAgent:
 
         Args:
             obs: 观测向量 shape=(obs_dim,)
-            mask: 动作掩码 shape=(K,)，True=合法
+            mask: 动作掩码 shape=(K,)，True=合法；None=全合法
             step_id: 子步骤编号 0-4
             epsilon: 探索概率
 
         Returns:
             选中的动作索引
         """
+        # 确定动作空间大小
+        head_dims = [self.n_movable, self.grid_w, self.grid_h, 4, 2]
+        n_actions = head_dims[step_id]
+
+        # 无掩码：所有动作合法
+        if mask is None:
+            if random.random() < epsilon:
+                return random.randint(0, n_actions - 1)
+            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                q_values = self.q_net(obs_tensor, step_id).squeeze(0)
+                return int(q_values.argmax().item())
+
+        # 有掩码
         valid_indices = np.where(mask)[0]
         if len(valid_indices) == 0:
             logger.error(
@@ -107,8 +121,8 @@ class DQNAgent:
             target = r + γ * max_{a'} Q_target(s', a', next_step_id) * (1 - done)
             其中 next_step_id=-1 表示终端状态（无 next Q）
 
-        掩码仅在动作选择阶段使用，目标端不掩码，
-        避免跨 step 掩码维度不匹配问题。
+        Target 端掩码：仅 next_step_id=0 时从 next_obs 提取 placed_flag
+        构建掩码，屏蔽已放置元件的虚高 Q 值。
 
         Args:
             batch: ReplayBuffer.sample() 返回的 8 元组
@@ -136,7 +150,8 @@ class DQNAgent:
             q_all = self.q_net(obs_tensor[idx], sid)
             q_vals[idx] = q_all.gather(1, actions_tensor[idx])
 
-        # 目标 Q 值：按 next_step_id 分组走对应 Head（不掩码）
+        # 目标 Q 值：按 next_step_id 分组走对应 Head
+        # next_step_id=0 时掩码（屏蔽已放置元件），其余不掩码
         target_q = torch.zeros(batch_size, 1, device=self.device)
         with torch.no_grad():
             for nsid in range(5):
@@ -145,6 +160,17 @@ class DQNAgent:
                     continue
                 nidx = torch.BoolTensor(ns_idx).to(self.device)
                 next_q_all = self.target_net(next_obs_tensor[nidx], nsid)
+
+                if nsid == 0:
+                    # 从 next_obs 提取 placed_flag，构建元件选择掩码
+                    # obs 结构：每元件 8 维，第一个维度 = placed_flag (1.0=已放置)
+                    placed_flags = next_obs_tensor[nidx, :self.n_movable * 8]
+                    placed_batch = placed_flags[:, ::8]  # shape=(n_subset, n_movable)
+                    comp_mask = (placed_batch < 0.5).to(self.device)  # True=未放置=可选
+                    # 保护：若所有元件已放置，不设 inf（避免 max=-inf）
+                    if comp_mask.any():
+                        next_q_all[~comp_mask] = -float('inf')
+
                 target_q[ns_idx] = next_q_all.max(1)[0].unsqueeze(1)
 
         # 标准 DQN 目标：r + γ * max Q(s', a') * (1 - done)

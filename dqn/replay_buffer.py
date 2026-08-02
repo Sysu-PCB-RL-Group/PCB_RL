@@ -31,7 +31,7 @@ class ReplayBuffer:
         action: int,
         reward: float,
         next_obs: np.ndarray,
-        mask: np.ndarray,
+        mask: Optional[np.ndarray],
         done: bool,
         step_id: int,
         next_step_id: int,
@@ -43,7 +43,7 @@ class ReplayBuffer:
             action: 选中的动作索引
             reward: 延迟 reward（仅 step_id=4 时非零）
             next_obs: 下一步观测 (obs_dim,)
-            mask: 当前子步骤的动作掩码 (K,)
+            mask: 当前子步骤的动作掩码 (K,) 或 None（无掩码）
             done: 是否终止（仅 step_id=4 时可能为 True）
             step_id: 当前子步骤编号 0-4
             next_step_id: 下个子步骤编号，-1 表示终端

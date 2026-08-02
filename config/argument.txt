@@ -1,21 +1,24 @@
 # ========== Reward 权重（负值为惩罚，正值为奖励） ==========
-W_OVERLAP_HARD        = 1000.0    # 硬重叠惩罚（元件物理碰撞，必须避免）
+W_OVERLAP_HARD        = 100.0     # 硬重叠惩罚（元件物理碰撞，必须避免）
 W_OVERLAP_SOFT        = 50.0      # 软间距惩罚（元件距离太近但不重叠）
-W_OUT_OF_BOUNDS_INITIAL= 100.0    # 出板框初始惩罚（curriculum 前期宽松）
-W_OUT_OF_BOUNDS_FINAL  = 1000.0   # 出板框最终惩罚（curriculum 后期>500ep 收紧至此值）
-W_NET_AGGREGATION     = 1.0       # 网络聚集奖励（同一网络元件越近越好）
-W_CONGESTION          = 1.0       # 拥挤惩罚（局部元件密度过高）
-W_DECOUPLING           = 1.0      # 去耦电容配对奖励（去耦电容靠近对应 IC）
-W_LARGE_COMP           = 1.0      # 大型元件优先奖励（大元件早放有更多空位可选）
-W_COMPLETION           = 500.0    # 完成奖励（每成功放置一颗元件的基础分）
+W_OUT_OF_BOUNDS_INITIAL= 10.0     # 出板框初始惩罚（curriculum 前期宽松）
+W_OUT_OF_BOUNDS_FINAL  = 100.0    # 出板框最终惩罚（curriculum 后期>500ep 收紧至此值）
+W_NET_AGGREGATION     = 10.0      # 网络聚集奖励（同一网络元件越近越好）
+W_CONGESTION          = 5.0       # 拥塞均衡奖励（引导元件分布均匀）
+W_DECOUPLING           = 10.0     # 去耦电容配对奖励（去耦电容靠近对应 IC）
+W_LARGE_COMP           = 5.0      # 大型元件优先奖励（大元件早放有更多空位可选）
+W_COMPLETION           = 200.0    # 完成奖励（每成功放置一颗元件的基础分）
+
+# ========== Reward Shaping：品质项时序 ==========
+QUALITY_START_EP      = 10000     # 品质项开始介入的 episode（暂时关闭，先验证纯约束收敛）
+QUALITY_RAMP_EP       = 2000      # 品质项线性升温 episode 数（到 START+RAMP 时品质权重=1.0）
 
 # ========== 训练参数 ==========
 GAMMA               = 0.99       # 折扣因子（0.99^5≈0.95，5步子任务间有效；跨元件衰减大但局部优先有益）
 EPSILON_START       = 1.0        # ε-greedy 初始探索率（完全随机）
-EPSILON_END         = 0.01       # ε-greedy 最终探索率（1% 随机探索）
-EPSILON_DECAY_EPISODES = 10000  # ε 从 START 线性衰减到 END 需要多少个 episode
+EPSILON_MIN         = 0.05       # ε-greedy 最小探索率（指数衰减下界）
 MAX_STEPS           = 2000       # 单 episode 最大环境步数（233 元件×5 子步≈1165，留余量）
-EARLY_STOP_THRESHOLD  = -10000.0 # 累计 reward 低于此值提前终止 episode（放宽避免早切）
+EARLY_STOP_THRESHOLD  = -1000.0  # 累计 reward 低于此值提前终止 episode（惩罚缩小 10x 同步）
 CURRICULUM_START_EP = 0          # curriculum 起始 episode（出界惩罚从轻到重）
 CURRICULUM_END_EP   = 500        # curriculum 截止 episode（500ep 后出界惩罚=最终值）
 TOTAL_EPISODES      = 10000      # 总训练 episode 数
