@@ -81,19 +81,27 @@ class Runner:
         # Loss 历史（用于绘制 loss-episode 曲线）
         self.loss_history: list = []  # [(episode_num, avg_loss), ...]
 
-    def run(self):
-        """主训练循环。
+        # 各个 PCB 的训练统计（用于最终汇总）
+        self._pcb_history: list[dict] = []
 
-        遍历所有 PCB 文件 → 按 env 维度创建 Agent/Buffer → 训练 total_episodes 轮。
-        每个 episode：5 步自回归决策 → 共享 reward 写入 buffer → 每个 env step 后
-        buffer 够一个 batch 就采样做一次 BP（DQN off-policy 在线学习）。
-        """
+    def run(self):
+        """主训练循环。"""
+        # 文件日志（离线查看用）
+        log_path = os.path.join(self.save_dir, "training_log.txt")
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        logger.addHandler(file_handler)
+        logger.info(f"Log file: {log_path}")
+
         pcb_files = self._get_pcb_files()
         if not pcb_files:
             logger.error(f"No PCB files found in {self.data_dir}")
             return
 
         logger.info(f"Found {len(pcb_files)} PCB files: {pcb_files}")
+        logger.info(
+            f"Config: MAX_MOVABLE={Config.MAX_MOVABLE}, GRID_W={Config.GRID_W}, GRID_H={Config.GRID_H}"
+        )
         self.total_episodes = getattr(self.args, "total_episodes", Config.TOTAL_EPISODES)
 
         for file_path in pcb_files:
@@ -102,15 +110,15 @@ class Runner:
 
             env = self._create_env(file_path)
             try:
-                # 按当前 env 维度初始化 Agent 和 Buffer
                 agent, buffer = self._init_agent_and_buffer(env)
 
-                # 重置本 PCB 的 episode 计数和最佳布局追踪
                 self.pcb_episode_num = 0
                 self._backup_previous_results(pcb_name)
                 pcb_best_reward = float("-inf")
                 pcb_best_state = None
                 pcb_best_episode = -1
+                ep_rewards = []
+                ep_placed_list = []
 
                 for ep in range(self.total_episodes):
                     self.episode_num += 1
@@ -118,35 +126,31 @@ class Runner:
                     ep_reward, ep_steps, ep_placed, avg_loss = self._run_episode(
                         env, agent, buffer, pcb_name
                     )
+                    ep_rewards.append(ep_reward)
+                    ep_placed_list.append(ep_placed)
 
-                    # 追踪当前 PCB 最佳布局 + 保存最佳 checkpoint
                     if ep_reward > pcb_best_reward:
                         pcb_best_reward = ep_reward
                         pcb_best_state = self._snapshot_state(env)
                         pcb_best_episode = self.episode_num
-                        self._save_best_checkpoint(agent, pcb_name)
+                        self._save_best_checkpoint(agent, pcb_name, pcb_best_reward, pcb_best_episode)
 
-                    # 记录 & 保存
                     self.loss_history.append((self.pcb_episode_num, avg_loss))
                     self._log_episode(
                         pcb_name, ep_reward, ep_steps, ep_placed, avg_loss,
                     )
 
-                    # 每 100 episode 输出 Loss 曲线图
                     if self.pcb_episode_num % 100 == 0:
                         self._plot_loss_curve(pcb_name)
 
-                # 训练结束：强制保存最终 loss_history（避免尾段 99 个 episode 丢失）
                 self._plot_loss_curve(pcb_name)
 
-                # 每块 PCB 训练完后导出其最佳布局
                 if pcb_best_state is not None:
                     self.best_layout_reward = pcb_best_reward
                     self.best_layout_state = pcb_best_state
                     self.best_layout_episode = pcb_best_episode
                     self._export_best_layout(pcb_name)
 
-                # 显式指定 --total_episodes 时，训练结束后强制保存 final checkpoint
                 if getattr(self.args, "explicit_total_episodes", False):
                     ckpt_path = os.path.join(
                         self.save_dir,
@@ -154,8 +158,18 @@ class Runner:
                     )
                     agent.save(ckpt_path)
                     logger.info(f"Final checkpoint saved: {ckpt_path}")
+
+                # PCB 训练汇总
+                self._write_pcb_summary(
+                    pcb_name, env.N_movable, ep_rewards, ep_placed_list,
+                    pcb_best_reward, pcb_best_episode,
+                )
             finally:
                 env.close()
+
+        self._write_final_summary()
+        logger.removeHandler(file_handler)
+        file_handler.close()
 
     # ==================== 单个 episode ====================
 
@@ -285,9 +299,10 @@ class Runner:
     # ==================== 工具方法 ====================
 
     def _init_agent_and_buffer(self, env: PCBLayoutEnv):
-        """根据 env 尺寸创建 DQN Agent 和 ReplayBuffer。
+        """根据固定 MAX 常量创建 DQN Agent 和 ReplayBuffer。
 
-        obs_dim = N_movable * 8 (raw) + N_movable (comp onehot) + 4 (gx1, gy1, rot, lay)
+        网络使用 Dict 观测（slot encoder 共享权重），Head 维度 = MAX 常量，
+        变长逻辑通过 mask 实现。不同 PCB 共享同一网络结构。
 
         Args:
             env: 已加载 PCB 的环境实例
@@ -295,20 +310,19 @@ class Runner:
         Returns:
             (DQNAgent, ReplayBuffer) 元组
         """
-        obs_dim = env.N_movable * 8 + env.N_movable + 4
         agent = DQNAgent(
-            obs_dim=obs_dim,
-            n_movable=env.N_movable,
-            grid_w=env.grid_width,
-            grid_h=env.grid_height,
+            n_movable=Config.MAX_MOVABLE,
+            grid_w=Config.GRID_W,
+            grid_h=Config.GRID_H,
             device=self.device,
             lr=Config.LEARNING_RATE,
             gamma=Config.GAMMA,
         )
         buffer = ReplayBuffer(capacity=Config.REPLAY_BUFFER_SIZE)
         logger.info(
-            f"Agent created: obs_dim={obs_dim}, N_movable={env.N_movable}, "
-            f"grid=({env.grid_width},{env.grid_height}), device={self.device}"
+            f"Agent created: Dict obs (slots={Config.MAX_MOVABLE}×8 + global=8), "
+            f"head_dims=({Config.MAX_MOVABLE},{Config.GRID_W},{Config.GRID_H}), "
+            f"env(N_movable={env.N_movable}, grid={env.grid_width}x{env.grid_height}), device={self.device}"
         )
         return agent, buffer
 
@@ -374,17 +388,13 @@ class Runner:
             f"ε={epsilon:.3f}  loss={loss:.4f}"
         )
 
-    def _save_best_checkpoint(self, agent: DQNAgent, pcb_name: str):
-        """保存当前最佳模型权重（覆盖旧文件，只保留最优）。
-
-        Args:
-            agent: DQN Agent
-            pcb_name: PCB 文件名（用于命名）
-        """
+    def _save_best_checkpoint(self, agent: DQNAgent, pcb_name: str,
+                              best_r: float, best_ep: int):
+        """保存当前最佳模型权重（覆盖旧文件，只保留最优）。"""
         pcb_short = pcb_name.replace(".kicad_pcb", "")
         ckpt_path = os.path.join(self.save_dir, f"{pcb_short}_best.pt")
         agent.save(ckpt_path)
-        logger.info(f"Best checkpoint saved: {ckpt_path} (R={self.best_layout_reward:.2f}, ep={self.best_layout_episode})")
+        logger.info(f"Best checkpoint saved: {ckpt_path} (R={best_r:.2f}, ep={best_ep})")
 
     def _backup_previous_results(self, pcb_name: str):
         """训练开始前备份上次的结果文件，避免覆盖丢失。
@@ -486,3 +496,54 @@ class Runner:
             }, f, indent=2, ensure_ascii=False)
         logger.info(f"Best layout exported: {json_path} "
                      f"(ep={self.best_layout_episode}, R={self.best_layout_reward:.2f})")
+
+    def _write_pcb_summary(self, pcb_name: str, n_movable: int,
+                           rewards: list, placed_list: list,
+                           best_r: float, best_ep: int):
+        """单个 PCB 训练完成后写汇总日志。"""
+        import json
+        first_n = max(1, len(rewards) // 5)
+        last_n = max(1, len(rewards) // 5)
+
+        logger.info("=" * 50)
+        logger.info(f"PCB 训练完成: {pcb_name}")
+        logger.info(f"  元件数: {n_movable}")
+        logger.info(f"  前 20% 平均 R: {sum(rewards[:first_n]) / first_n:.2f}")
+        logger.info(f"  后 20% 平均 R: {sum(rewards[-last_n:]) / last_n:.2f}")
+        logger.info(f"  最终 5 轮 R: {[f'{r:.1f}' for r in rewards[-5:]]}")
+        logger.info(f"  前 20% 平均 placed: {sum(placed_list[:first_n]) / first_n:.1f}")
+        logger.info(f"  后 20% 平均 placed: {sum(placed_list[-last_n:]) / last_n:.1f}")
+        logger.info(f"  最佳 R: {best_r:.2f} (ep {best_ep})")
+
+        self._pcb_history.append({
+            "pcb": pcb_name,
+            "n_movable": n_movable,
+            "best_reward": best_r,
+            "best_episode": best_ep,
+            "first_avg_r": sum(rewards[:first_n]) / first_n,
+            "last_avg_r": sum(rewards[-last_n:]) / last_n,
+            "first_avg_placed": sum(placed_list[:first_n]) / first_n,
+            "last_avg_placed": sum(placed_list[-last_n:]) / last_n,
+        })
+
+        summary_path = os.path.join(self.save_dir, "training_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(self._pcb_history, f, indent=2, ensure_ascii=False)
+        logger.info(f"  汇总已保存: {summary_path}")
+
+    def _write_final_summary(self):
+        """全部 PCB 训练完成后写最终汇总。"""
+        logger.info("=" * 50)
+        logger.info("全部训练完成 — 最终汇总")
+        for h in self._pcb_history:
+            improved = h["last_avg_r"] > h["first_avg_r"]
+            arrow = "↑" if improved else "↓"
+            logger.info(
+                f"  {h['pcb'][:40]:40s}  "
+                f"R: {h['first_avg_r']:8.1f} → {h['last_avg_r']:8.1f} {arrow}  "
+                f"placed: {h['first_avg_placed']:5.1f} → {h['last_avg_placed']:5.1f}  "
+                f"best_R={h['best_reward']:.1f}"
+            )
+        logger.info(f"日志文件: {os.path.join(self.save_dir, 'training_log.txt')}")
+        logger.info(f"汇总 JSON: {os.path.join(self.save_dir, 'training_summary.json')}")
+        logger.info(f"最佳布局: {os.path.join(self.save_dir, 'best_layout')}/")

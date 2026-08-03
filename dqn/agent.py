@@ -1,6 +1,7 @@
 """DQN Agent：epsilon-greedy 选择 + 按 step_id 路由学习 + target 同步。
 
-基于 SPEC v2.2 §4.5 和 §10.1。
+基于 SPEC v2.3：Dict 观测 + 共享 slot encoder 网络。
+Target 端掩码（nsid=0）：从 component_slots[:,:,0] 提取 placed_flag 屏蔽已放置元件。
 """
 
 import random
@@ -23,7 +24,6 @@ class DQNAgent:
 
     def __init__(
         self,
-        obs_dim: int,
         n_movable: int,
         grid_w: int,
         grid_h: int,
@@ -34,10 +34,9 @@ class DQNAgent:
         """初始化 Agent。
 
         Args:
-            obs_dim: 观测维度
-            n_movable: 可移动元件数
-            grid_w: 网格宽度
-            grid_h: 网格高度
+            n_movable: Head 0 输出维度 (固定 = MAX_MOVABLE)
+            grid_w: Head 1 输出维度 (固定 = GRID_W)
+            grid_h: Head 2 输出维度 (固定 = GRID_H)
             device: 计算设备
             lr: Adam 学习率
             gamma: 折扣因子
@@ -49,10 +48,10 @@ class DQNAgent:
         self.grid_h = grid_h
 
         # Q 网络 & target 网络
-        self.q_net = DQN(obs_dim, n_movable, grid_w, grid_h).to(device)
-        self.target_net = DQN(obs_dim, n_movable, grid_w, grid_h).to(device)
+        self.q_net = DQN(n_movable=n_movable, grid_w=grid_w, grid_h=grid_h).to(device)
+        self.target_net = DQN(n_movable=n_movable, grid_w=grid_w, grid_h=grid_h).to(device)
         self.target_net.load_state_dict(self.q_net.state_dict())
-        self.target_net.eval()  # target 网络始终 eval 模式
+        self.target_net.eval()
 
         # 优化器
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
@@ -61,9 +60,23 @@ class DQNAgent:
         # 训练步数计数器（用于 target 同步判定）
         self.train_steps: int = 0
 
+    def _obs_to_tensor(self, obs: dict) -> dict:
+        """将 numpy dict 观测转为 torch tensors（单样本，加 batch 维）。"""
+        return {
+            "component_slots": torch.FloatTensor(obs["component_slots"]).unsqueeze(0).to(self.device),
+            "global_features": torch.FloatTensor(obs["global_features"]).unsqueeze(0).to(self.device),
+        }
+
+    def _batch_obs_to_tensor(self, obs_batch: dict) -> dict:
+        """将 batched dict 观测转为 torch tensors。"""
+        return {
+            "component_slots": torch.FloatTensor(obs_batch["component_slots"]).to(self.device),
+            "global_features": torch.FloatTensor(obs_batch["global_features"]).to(self.device),
+        }
+
     def select_action(
         self,
-        obs: np.ndarray,
+        obs: dict,
         mask: Optional[np.ndarray],
         step_id: int,
         epsilon: float = 0.0,
@@ -71,7 +84,7 @@ class DQNAgent:
         """epsilon-greedy 动作选择。
 
         Args:
-            obs: 观测向量 shape=(obs_dim,)
+            obs: Dict 观测 {"component_slots": (M,8), "global_features": (8,)}
             mask: 动作掩码 shape=(K,)，True=合法；None=全合法
             step_id: 子步骤编号 0-4
             epsilon: 探索概率
@@ -87,7 +100,7 @@ class DQNAgent:
         if mask is None:
             if random.random() < epsilon:
                 return random.randint(0, n_actions - 1)
-            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+            obs_tensor = self._obs_to_tensor(obs)
             with torch.no_grad():
                 q_values = self.q_net(obs_tensor, step_id).squeeze(0)
                 return int(q_values.argmax().item())
@@ -99,17 +112,14 @@ class DQNAgent:
                 f"select_action: mask all-False at step_id={step_id}! "
                 f"Returning 0 as fallback — check _build_mask_for_step."
             )
-            return 0  # fallback
+            return 0
 
-        # 探索
         if random.random() < epsilon:
             return int(valid_indices[random.randint(0, len(valid_indices) - 1)])
 
-        # 利用
-        obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+        obs_tensor = self._obs_to_tensor(obs)
         with torch.no_grad():
-            q_values = self.q_net(obs_tensor, step_id).squeeze(0)  # shape=(K,)
-            # 掩码：非法动作 → -inf
+            q_values = self.q_net(obs_tensor, step_id).squeeze(0)
             mask_tensor = torch.tensor(mask, dtype=torch.bool).to(self.device)
             q_values[~mask_tensor] = -float('inf')
             return int(q_values.argmax().item())
@@ -119,9 +129,8 @@ class DQNAgent:
 
         Q-Learning 目标：
             target = r + γ * max_{a'} Q_target(s', a', next_step_id) * (1 - done)
-            其中 next_step_id=-1 表示终端状态（无 next Q）
 
-        Target 端掩码：仅 next_step_id=0 时从 next_obs 提取 placed_flag
+        Target 端掩码：仅 next_step_id=0 时从 component_slots 提取 placed_flag
         构建掩码，屏蔽已放置元件的虚高 Q 值。
 
         Args:
@@ -132,13 +141,13 @@ class DQNAgent:
         """
         obs_batch, actions, rewards, next_obs_batch, masks, dones, step_ids, next_step_ids = batch
 
-        obs_tensor = torch.FloatTensor(obs_batch).to(self.device)
+        obs_tensor = self._batch_obs_to_tensor(obs_batch)
+        next_obs_tensor = self._batch_obs_to_tensor(next_obs_batch)
         actions_tensor = torch.LongTensor(actions).unsqueeze(1).to(self.device)
         rewards_tensor = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
-        next_obs_tensor = torch.FloatTensor(next_obs_batch).to(self.device)
         dones_tensor = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
 
-        batch_size = obs_batch.shape[0]
+        batch_size = actions_tensor.shape[0]
 
         # 当前 Q 值：按 step_id 分组走对应 Head
         q_vals = torch.zeros(batch_size, 1, device=self.device)
@@ -147,7 +156,11 @@ class DQNAgent:
             if not step_idx.any():
                 continue
             idx = torch.BoolTensor(step_idx).to(self.device)
-            q_all = self.q_net(obs_tensor[idx], sid)
+            sub_obs = {
+                "component_slots": obs_tensor["component_slots"][idx],
+                "global_features": obs_tensor["global_features"][idx],
+            }
+            q_all = self.q_net(sub_obs, sid)
             q_vals[idx] = q_all.gather(1, actions_tensor[idx])
 
         # 目标 Q 值：按 next_step_id 分组走对应 Head
@@ -159,15 +172,16 @@ class DQNAgent:
                 if not ns_idx.any():
                     continue
                 nidx = torch.BoolTensor(ns_idx).to(self.device)
-                next_q_all = self.target_net(next_obs_tensor[nidx], nsid)
+                sub_next = {
+                    "component_slots": next_obs_tensor["component_slots"][nidx],
+                    "global_features": next_obs_tensor["global_features"][nidx],
+                }
+                next_q_all = self.target_net(sub_next, nsid)
 
                 if nsid == 0:
-                    # 从 next_obs 提取 placed_flag，构建元件选择掩码
-                    # obs 结构：每元件 8 维，第一个维度 = placed_flag (1.0=已放置)
-                    placed_flags = next_obs_tensor[nidx, :self.n_movable * 8]
-                    placed_batch = placed_flags[:, ::8]  # shape=(n_subset, n_movable)
-                    comp_mask = (placed_batch < 0.5).to(self.device)  # True=未放置=可选
-                    # 保护：若所有元件已放置，不设 inf（避免 max=-inf）
+                    # 从 Dict 观测提取 placed_flag（每个 slot 的第 0 维）
+                    placed_flags = sub_next["component_slots"][:, :, 0]  # (n_subset, M)
+                    comp_mask = (placed_flags < 0.5).to(self.device)  # True=未放置=可选
                     if comp_mask.any():
                         next_q_all[~comp_mask] = -float('inf')
 
@@ -193,11 +207,7 @@ class DQNAgent:
         logger.debug(f"Target network synced at train_step={self.train_steps}")
 
     def save(self, path: str):
-        """保存模型检查点。
-
-        Args:
-            path: 保存路径
-        """
+        """保存模型检查点。"""
         torch.save({
             'q_net': self.q_net.state_dict(),
             'target_net': self.target_net.state_dict(),
@@ -207,11 +217,7 @@ class DQNAgent:
         logger.info(f"Checkpoint saved to {path}")
 
     def load(self, path: str):
-        """加载模型检查点。
-
-        Args:
-            path: 检查点路径
-        """
+        """加载模型检查点。"""
         checkpoint = torch.load(path, map_location=self.device)
         self.q_net.load_state_dict(checkpoint['q_net'])
         self.target_net.load_state_dict(checkpoint['target_net'])

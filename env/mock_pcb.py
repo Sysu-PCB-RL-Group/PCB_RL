@@ -296,13 +296,15 @@ def _init_env_from_kicad(env, kicad: MockKiCadUtils, pcb_path: str):
         spaces.Discrete(2),                    # layer
     ])
 
-    obs_dim = env.N_movable * 8 + env.N_movable + 4
-    env.observation_space = spaces.Box(
-        low=0.0,
-        high=float(max(max_x - min_x, max_y - min_y, env.N_movable)),
-        shape=(obs_dim,),
-        dtype=np.float32,
-    )
+    # 观测空间（Dict 结构，与 PCBLayoutEnv.__init__ 一致）
+    env.observation_space = spaces.Dict({
+        "component_slots": spaces.Box(
+            low=-np.inf, high=np.inf, shape=(Config.MAX_MOVABLE, 8), dtype=np.float32
+        ),
+        "global_features": spaces.Box(
+            low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32
+        ),
+    })
 
 
 def create_patched_env():

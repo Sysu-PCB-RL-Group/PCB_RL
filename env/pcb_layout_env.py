@@ -58,6 +58,13 @@ class Config:
     CELL_SIZE: float = 1.0
     CONGESTION_CELL_SIZE: float = 2.0
 
+    # 固定维度上限（支持不同 PCB 使用同一网络）
+    # 当前针对开关小板（6 元件, 7×7 grid），设为实际值的 2 倍
+    # 切换到大板时需恢复: MAX_MOVABLE=384, GRID_W=512, GRID_H=512
+    MAX_MOVABLE: int = 18        # 最大可移动元件数 (6 × 20)
+    GRID_W: int = 21             # 最大网格宽度 (7 × 20)
+    GRID_H: int = 21             # 最大网格高度 (7 × 20)
+
     @classmethod
     def load_from_file(cls, path: str):
         """从 argument.txt 加载配置，覆盖默认值。
@@ -89,6 +96,37 @@ class Config:
                         setattr(cls, key, val)
         except FileNotFoundError:
             logger.warning(f"Config file not found: {path}, using defaults")
+
+    @classmethod
+    def load_dims_from_file(cls, path: str):
+        """从 admin.txt 加载固定维度参数。
+
+        Args:
+            path: admin.txt 文件路径，key=value 格式
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    key = key.strip()
+                    val_str = val.split("#")[0].strip()
+                    if not val_str:
+                        continue
+                    try:
+                        dim_val = int(val_str)
+                    except ValueError:
+                        continue
+                    if hasattr(cls, key) and key in ("MAX_MOVABLE", "GRID_W", "GRID_H"):
+                        setattr(cls, key, dim_val)
+            logger.info(
+                f"Dim params loaded from {path}: "
+                f"MAX_MOVABLE={cls.MAX_MOVABLE}, GRID_W={cls.GRID_W}, GRID_H={cls.GRID_H}"
+            )
+        except FileNotFoundError:
+            logger.warning(f"Dim config not found: {path}, using code defaults")
 
     @classmethod
     def spacing_threshold_for(cls, type_a: int, type_b: int) -> float:
@@ -125,6 +163,11 @@ class PCBLayoutEnv(gym.Env):
         # 加载配置
         if config_path:
             Config.load_from_file(config_path)
+
+        # 加载固定维度参数（admin.txt）
+        import os as _os
+        _dim_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "config", "admin.txt")
+        Config.load_dims_from_file(_dim_path)
 
         self._pcb_path = pcb_path  # 保存路径，供 reset() 重新加载
 
@@ -164,18 +207,17 @@ class PCBLayoutEnv(gym.Env):
             spaces.Discrete(2),                       # layer {0,1}
         ])
 
-        # 观测空间: raw(N_movable×8) + pending(N_movable + 4)
-        obs_dim = self.N_movable * 8 + self.N_movable + 4
-        self.observation_space = spaces.Box(
-            low=0.0,
-            high=max(
-                max_x - min_x,
-                max_y - min_y,
-                self.N_movable,     # net_count 上界
+        # 观测空间: Dict 结构（固定维度，不同 PCB 使用同一网络）
+        #   component_slots: (MAX_MOVABLE, 8) — 每元件 [placed_flag,x1,y1,x2,y2,rot,layer,net_score]
+        #   global_features: (8,)           — 板框 + 放置进度 + pending 编码
+        self.observation_space = spaces.Dict({
+            "component_slots": spaces.Box(
+                low=-np.inf, high=np.inf, shape=(Config.MAX_MOVABLE, 8), dtype=np.float32
             ),
-            shape=(obs_dim,),
-            dtype=np.float32,
-        )
+            "global_features": spaces.Box(
+                low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32
+            ),
+        })
 
         # 训练动态参数
         self.W_OUT_OF_BOUNDS_CURRENT = Config.W_OUT_OF_BOUNDS_INITIAL
@@ -389,38 +431,68 @@ class PCBLayoutEnv(gym.Env):
     # ==================== 内部方法 ====================
 
     def _get_obs(self) -> np.ndarray:
-        """构建 fixed-slot 观测向量 (N_movable × 8)。
+        """构建 fixed-slot 观测矩阵 (MAX_MOVABLE, 8)。
 
-        每个元件 8 维：placed_flag, x1, y1, x2, y2, rotation, layer, net_count。
+        每个 slot 8 维：placed_flag, x1, y1, x2, y2, rotation, layer, net_count。
+        slot 索引 = movable_list 中的位置，padding slot 全 0。
 
         Returns:
-            shape=(N_movable*8,) 的 float32 向量
+            shape=(MAX_MOVABLE, 8) 的 float32 矩阵
         """
-        obs = np.zeros(self.N_movable * 8, dtype=np.float32)
+        obs = np.zeros((Config.MAX_MOVABLE, 8), dtype=np.float32)
 
-        # 建立 comp_id → slot_idx 映射
-        for slot_idx, comp in enumerate(self.movable_list):
+        n_slots = min(self.N_movable, Config.MAX_MOVABLE)
+        if self.N_movable > Config.MAX_MOVABLE:
+            logger.warning(
+                f"N_movable={self.N_movable} > MAX_MOVABLE={Config.MAX_MOVABLE}, "
+                f"超出部分元件将被忽略"
+            )
+        for slot_idx, comp in enumerate(self.movable_list[:n_slots]):
             if not comp.is_placed:
                 continue
-            base = slot_idx * 8
-            obs[base + 0] = 1.0                        # placed_flag
-            obs[base + 1] = comp.bbox[0]               # x1
-            obs[base + 2] = comp.bbox[1]               # y1
-            obs[base + 3] = comp.bbox[2]               # x2
-            obs[base + 4] = comp.bbox[3]               # y2
-            obs[base + 5] = float(comp.rotation)       # rotation
-            obs[base + 6] = float(comp.layer)          # layer
-            obs[base + 7] = float(len(comp.nets))      # net_count
+            obs[slot_idx, 0] = 1.0                        # placed_flag
+            obs[slot_idx, 1] = comp.bbox[0]               # x1
+            obs[slot_idx, 2] = comp.bbox[1]               # y1
+            obs[slot_idx, 3] = comp.bbox[2]               # x2
+            obs[slot_idx, 4] = comp.bbox[3]               # y2
+            obs[slot_idx, 5] = float(comp.rotation)       # rotation
+            obs[slot_idx, 6] = float(comp.layer)          # layer
+            obs[slot_idx, 7] = float(len(comp.nets))      # net_count
 
         return obs
+
+    def _compute_global_features(self) -> np.ndarray:
+        """计算 8 维全局特征。
+
+        Returns:
+            shape=(8,) 的 float32 向量
+            [0] board_w_norm  = grid_width / GRID_W
+            [1] board_h_norm  = grid_height / GRID_H
+            [2] placement_ratio = len(placed_list) / N_movable
+            [3] pending_comp_norm = _pending_comp_idx / MAX_MOVABLE  (-1 表示未选)
+            [4] pending_gx1_norm  = _pending_gx1 / max(grid_width, 1)  (-1 表示未选)
+            [5] pending_gy1_norm  = _pending_gy1 / max(grid_height, 1)  (-1 表示未选)
+            [6] pending_rot_norm  = _pending_rot / 4.0
+            [7] pending_lay       = float(_pending_lay)
+        """
+        feats = np.zeros(8, dtype=np.float32)
+        feats[0] = self.grid_width / max(Config.GRID_W, 1)
+        feats[1] = self.grid_height / max(Config.GRID_H, 1)
+        feats[2] = len(self.placed_list) / max(self.N_movable, 1)
+        feats[3] = self._pending_comp_idx / max(Config.MAX_MOVABLE, 1) \
+            if self._pending_comp_idx >= 0 else -1.0
+        feats[4] = self._pending_gx1 / max(self.grid_width, 1) \
+            if self._pending_gx1 >= 0 else -1.0
+        feats[5] = self._pending_gy1 / max(self.grid_height, 1) \
+            if self._pending_gy1 >= 0 else -1.0
+        feats[6] = self._pending_rot / 4.0
+        feats[7] = float(self._pending_lay)
+        return feats
 
     # ---- 自回归 5 步接口 ----
 
     def _reset_pending(self):
-        """重置 5 步自回归的中间 pending 状态。
-
-        在每次新的元件放置前调用，将所有 pending 字段清零。
-        """
+        """重置 5 步自回归的中间 pending 状态。"""
         self._pending_comp_idx = -1
         self._pending_gx1 = -1
         self._pending_gy1 = -1
@@ -428,12 +500,7 @@ class PCBLayoutEnv(gym.Env):
         self._pending_lay = 0
 
     def _update_pending(self, action: int, step_id: int):
-        """将当前子步骤的动作写入 pending 状态。
-
-        Args:
-            action: 当前子步骤选择的离散动作索引
-            step_id: 子步骤编号 0=comp, 1=x1, 2=y1, 3=rot, 4=lay
-        """
+        """将当前子步骤的动作写入 pending 状态。"""
         if step_id == 0:
             self._pending_comp_idx = action
         elif step_id == 1:
@@ -446,14 +513,7 @@ class PCBLayoutEnv(gym.Env):
             self._pending_lay = action
 
     def _assemble_action(self) -> Tuple[int, ...]:
-        """将 pending 状态组装为完整的 7 元动作。
-
-        根据已选的 comp/gx1/gy1/rot/lay，自动推导 gx2/gy2。
-        调用方保证 5 步已完成。
-
-        Returns:
-            7 元动作 (comp_idx, gx1, gy1, gx2, gy2, rot, lay)
-        """
+        """将 pending 状态组装为完整的 7 元动作。"""
         comp = self.movable_list[self._pending_comp_idx]
         expected_w = max(1, int(comp.footprint_w / Config.CELL_SIZE))
         expected_h = max(1, int(comp.footprint_h / Config.CELL_SIZE))
@@ -469,62 +529,37 @@ class PCBLayoutEnv(gym.Env):
             self._pending_lay,
         )
 
-    def _get_obs_with_pending(self, step_id: int) -> np.ndarray:
-        """构建带 pending 状态的观测向量。
-
-        在 raw fixed-slot 观测后追加 N_movable 维 one-hot 元件选择
-        + 4 维 (gx1, gy1, rot, lay)。未选中的维度填 0。
-
-        Args:
-            step_id: 当前子步骤 0-4，决定哪些 pending 字段已填充
+    def _get_obs_with_pending(self, step_id: int) -> dict:
+        """构建带 pending 状态的 Dict 观测。
 
         Returns:
-            shape=(N_movable*8 + N_movable + 4,) 的 float32 向量
+            Dict: {"component_slots": (MAX_MOVABLE, 8), "global_features": (8,)}
         """
-        raw_obs = self._get_obs()  # shape=(N_movable*8,)
-
-        # pending_comp: one-hot of selected component
-        pending_comp = np.zeros(self.N_movable, dtype=np.float32)
-        pending_others = np.zeros(4, dtype=np.float32)
-
-        # 按 step_id 填充已选择的字段；仅在元件已选后才填充后续 pending 值
-        # （避免 _pending_comp_idx == -1 时错误地将无效坐标写入观测）
-        comp_ok = self._pending_comp_idx >= 0
-
-        if step_id >= 1 and comp_ok:
-            pending_comp[self._pending_comp_idx] = 1.0
-        if step_id >= 2 and comp_ok:
-            pending_others[0] = float(self._pending_gx1)
-        if step_id >= 3 and comp_ok:
-            pending_others[1] = float(self._pending_gy1)
-        if step_id >= 4 and comp_ok:
-            pending_others[2] = float(self._pending_rot)
-        if step_id >= 5 and comp_ok:
-            pending_others[3] = float(self._pending_lay)
-
-        return np.concatenate([raw_obs, pending_comp, pending_others])
+        return {
+            "component_slots": self._get_obs(),
+            "global_features": self._compute_global_features(),
+        }
 
     def _build_mask_for_step(self, step_id: int) -> Optional[np.ndarray]:
-        """为指定子步骤构建 1D bool 动作掩码。
+        """为指定子步骤构建固定维度 1D bool 动作掩码。
 
-        Step 0 (comp): 已放置/固定 → mask=False（硬规则，Agent 不可选）
-        Step 1~4: 无掩码，Agent 自行从 reward 学会避开出界/选合适旋转层
+        Step 0 (comp): index >= N_movable 或已放置/固定 → mask=False
+        Step 1~4: 无掩码，Agent 自行从 reward 学会边界
 
         Args:
             step_id: 子步骤编号 0-4
 
         Returns:
-            step 0: 1D bool 向量 (N_movable,)；step 1~4: None
+            step 0: 固定长度 (MAX_MOVABLE,) bool 向量；step 1~4: None
         """
         if step_id == 0:
-            # 元件选择掩码: 已放置/固定不可选
-            mask = np.ones(self.N_movable, dtype=bool)
-            for i, comp in enumerate(self.movable_list):
-                if comp.is_placed or comp.is_fixed:
-                    mask[i] = False
+            mask = np.zeros(Config.MAX_MOVABLE, dtype=bool)
+            n_valid = min(self.N_movable, Config.MAX_MOVABLE)
+            for i, comp in enumerate(self.movable_list[:n_valid]):
+                if not comp.is_placed and not comp.is_fixed:
+                    mask[i] = True
             return mask
 
-        # step 1~4: 无掩码
         return None
 
     def _get_quality_scale(self) -> float:

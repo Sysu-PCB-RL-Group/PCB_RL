@@ -55,6 +55,14 @@ class ReplayBuffer:
             self.buffer[self.position] = data
         self.position = (self.position + 1) % self.capacity
 
+    @staticmethod
+    def _batch_dict_obs(obs_list: list) -> dict:
+        """将 dict 观测列表拼接为 batched dict。"""
+        return {
+            "component_slots": np.stack([o["component_slots"] for o in obs_list]),
+            "global_features": np.stack([o["global_features"] for o in obs_list]),
+        }
+
     def sample(self, batch_size: int):
         """随机采样一个 mini-batch。
 
@@ -62,7 +70,7 @@ class ReplayBuffer:
             batch_size: 采样数量
 
         Returns:
-            8 元组 (obs, actions, rewards, next_obs, masks, dones, step_ids, next_step_ids)
+            8 元组 (obs_dict, actions, rewards, next_obs_dict, masks, dones, step_ids, next_step_ids)
         """
         indices = np.random.choice(len(self.buffer), size=batch_size, replace=False)
         batch = [self.buffer[i] for i in indices]
@@ -70,11 +78,11 @@ class ReplayBuffer:
         obs_list, actions, rewards, next_obs_list, masks, dones, step_ids, next_step_ids = zip(*batch)
 
         return (
-            np.array(obs_list, dtype=np.float32),
+            self._batch_dict_obs(obs_list),
             np.array(actions, dtype=np.int64),
             np.array(rewards, dtype=np.float32),
-            np.array(next_obs_list, dtype=np.float32),
-            list(masks),              # 保持 list 以支持不同长度的 mask
+            self._batch_dict_obs(next_obs_list),
+            list(masks),
             np.array(dones, dtype=np.float32),
             np.array(step_ids, dtype=np.int64),
             np.array(next_step_ids, dtype=np.int64),

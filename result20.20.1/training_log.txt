@@ -1,0 +1,133 @@
+2026-08-03 13:09:19,936 [INFO] Log file: ./result\training_log.txt
+2026-08-03 13:09:19,936 [INFO] Found 1 PCB files: ['D:\\PCB_RL\\kicad-native-batch\\ran-pang-airlink-86231b34--开关小板-883285b3\\ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb']
+2026-08-03 13:09:19,936 [INFO] Config: MAX_MOVABLE=120, GRID_W=140, GRID_H=140
+2026-08-03 13:09:19,936 [INFO] ===== Training on: ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb =====
+2026-08-03 13:09:22,057 [INFO] Agent created: Dict obs (slots=18×8 + global=8), head_dims=(18,21,21), env(N_movable=6, grid=7x7), device=cpu
+2026-08-03 13:09:22,493 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-1142.10, ep=1)
+2026-08-03 13:09:23,085 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-700.61, ep=2)
+2026-08-03 13:09:23,326 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-629.77, ep=3)
+2026-08-03 13:09:24,190 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-457.80, ep=5)
+2026-08-03 13:09:26,460 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-284.24, ep=10)
+2026-08-03 13:09:29,894 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-191.59, ep=18)
+2026-08-03 13:09:36,087 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=-59.56, ep=34)
+2026-08-03 13:09:58,851 [INFO] [Ep    100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -790.80  steps= 40  placed=  6  ε=0.963  loss=269.9862
+2026-08-03 13:10:26,519 [INFO] [Ep    200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1168.13  steps= 20  placed=  5  ε=0.927  loss=218.6281
+2026-08-03 13:10:47,315 [INFO] [Ep    300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1021.33  steps= 19  placed=  2  ε=0.893  loss=266.2994
+2026-08-03 13:11:04,042 [INFO] [Ep    400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.00  steps= 13  placed=  0  ε=0.860  loss=448.9222
+2026-08-03 13:11:18,564 [INFO] [Ep    500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1116.67  steps= 15  placed=  4  ε=0.828  loss=407.9515
+2026-08-03 13:11:32,155 [INFO] [Ep    600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1133.33  steps= 16  placed=  5  ε=0.797  loss=430.2639
+2026-08-03 13:11:46,441 [INFO] [Ep    700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1050.00  steps= 13  placed=  3  ε=0.768  loss=414.8537
+2026-08-03 13:12:00,693 [INFO] [Ep    800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1046.67  steps= 16  placed=  4  ε=0.740  loss=514.1196
+2026-08-03 13:12:15,479 [INFO] [Ep    900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1016.67  steps= 15  placed=  4  ε=0.713  loss=456.2274
+2026-08-03 13:12:31,062 [INFO] [Ep   1000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -700.00  steps= 14  placed=  6  ε=0.687  loss=560.1578
+2026-08-03 13:12:46,282 [INFO] [Ep   1100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1033.33  steps= 13  placed=  2  ε=0.662  loss=771.6213
+2026-08-03 13:13:02,353 [INFO] [Ep   1200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1063.33  steps= 15  placed=  5  ε=0.638  loss=694.6562
+2026-08-03 13:13:17,872 [INFO] [Ep   1300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -330.00  steps=  9  placed=  6  ε=0.615  loss=673.6137
+2026-08-03 13:13:33,715 [INFO] [Ep   1400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1063.33  steps= 14  placed=  5  ε=0.593  loss=812.9523
+2026-08-03 13:13:49,121 [INFO] [Ep   1500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -150.00  steps=  6  placed=  6  ε=0.571  loss=857.0635
+2026-08-03 13:14:03,953 [INFO] [Ep   1600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -500.00  steps= 12  placed=  6  ε=0.551  loss=951.3892
+2026-08-03 13:14:19,853 [INFO] [Ep   1700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1116.67  steps= 14  placed=  4  ε=0.531  loss=929.8497
+2026-08-03 13:14:36,386 [INFO] [Ep   1800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 12  placed=  1  ε=0.512  loss=787.6411
+2026-08-03 13:14:53,037 [INFO] [Ep   1900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 16  placed=  4  ε=0.494  loss=937.7111
+2026-08-03 13:15:09,174 [INFO] [Ep   2000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1050.00  steps= 12  placed=  3  ε=0.477  loss=1137.6283
+2026-08-03 13:15:25,820 [INFO] [Ep   2100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1083.33  steps= 13  placed=  2  ε=0.460  loss=1239.5178
+2026-08-03 13:15:42,415 [INFO] [Ep   2200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1060.00  steps= 13  placed=  3  ε=0.444  loss=956.8794
+2026-08-03 13:15:59,369 [INFO] [Ep   2300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.429  loss=1321.8855
+2026-08-03 13:16:16,957 [INFO] [Ep   2400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1046.67  steps= 12  placed=  1  ε=0.414  loss=1149.4420
+2026-08-03 13:16:34,298 [INFO] [Ep   2500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -906.00  steps= 16  placed=  6  ε=0.399  loss=1191.8830
+2026-08-03 13:16:51,962 [INFO] [Ep   2600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1096.67  steps= 16  placed=  4  ε=0.386  loss=1393.7423
+2026-08-03 13:17:09,138 [INFO] [Ep   2700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1046.67  steps= 12  placed=  1  ε=0.373  loss=1257.9832
+2026-08-03 13:17:12,756 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=0.00, ep=2721)
+2026-08-03 13:17:24,018 [INFO] [Ep   2800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.360  loss=1098.8217
+2026-08-03 13:17:40,297 [INFO] [Ep   2900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 10  placed=  4  ε=0.348  loss=1365.3729
+2026-08-03 13:17:57,602 [INFO] [Ep   3000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1016.67  steps= 15  placed=  4  ε=0.336  loss=1118.5677
+2026-08-03 13:18:13,391 [INFO] [Ep   3100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1056.67  steps= 14  placed=  4  ε=0.325  loss=1072.4477
+2026-08-03 13:18:29,018 [INFO] [Ep   3200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1033.33  steps= 10  placed=  5  ε=0.314  loss=1430.8575
+2026-08-03 13:18:46,375 [INFO] [Ep   3300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1083.33  steps= 17  placed=  5  ε=0.304  loss=1280.3455
+2026-08-03 13:19:04,911 [INFO] [Ep   3400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1083.33  steps= 17  placed=  5  ε=0.294  loss=1258.9143
+2026-08-03 13:19:22,794 [INFO] [Ep   3500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -250.00  steps=  6  placed=  6  ε=0.284  loss=1020.8576
+2026-08-03 13:19:30,330 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=50.00, ep=3542)
+2026-08-03 13:19:40,155 [INFO] [Ep   3600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1083.33  steps= 15  placed=  5  ε=0.275  loss=1004.8511
+2026-08-03 13:19:53,954 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=150.00, ep=3691)
+2026-08-03 13:19:55,379 [INFO] [Ep   3700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -580.00  steps= 11  placed=  6  ε=0.266  loss=1294.8281
+2026-08-03 13:20:10,009 [INFO] Best checkpoint saved: ./result\ran-pang-airlink-86231b34--开关小板-883285b3_best.pt (R=200.00, ep=3790)
+2026-08-03 13:20:11,490 [INFO] [Ep   3800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1013.33  steps= 13  placed=  2  ε=0.258  loss=1416.6133
+2026-08-03 13:20:25,988 [INFO] [Ep   3900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -780.00  steps= 15  placed=  6  ε=0.250  loss=1289.7137
+2026-08-03 13:20:40,140 [INFO] [Ep   4000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=    0.00  steps=  7  placed=  6  ε=0.242  loss=950.1828
+2026-08-03 13:20:53,820 [INFO] [Ep   4100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1046.67  steps= 17  placed=  4  ε=0.234  loss=1016.2158
+2026-08-03 13:21:07,558 [INFO] [Ep   4200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -600.00  steps= 12  placed=  6  ε=0.227  loss=1080.3792
+2026-08-03 13:21:19,976 [INFO] [Ep   4300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -560.00  steps= 12  placed=  6  ε=0.220  loss=1146.3674
+2026-08-03 13:21:33,038 [INFO] [Ep   4400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -850.00  steps= 14  placed=  6  ε=0.213  loss=1007.3470
+2026-08-03 13:21:44,256 [INFO] [Ep   4500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=  -50.00  steps=  6  placed=  6  ε=0.207  loss=1784.7962
+2026-08-03 13:21:57,564 [INFO] [Ep   4600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -640.00  steps= 12  placed=  6  ε=0.201  loss=1012.0933
+2026-08-03 13:22:10,276 [INFO] [Ep   4700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -500.00  steps= 11  placed=  6  ε=0.195  loss=1263.1046
+2026-08-03 13:22:22,422 [INFO] [Ep   4800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -450.00  steps=  8  placed=  6  ε=0.189  loss=1262.4232
+2026-08-03 13:22:34,000 [INFO] [Ep   4900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=    0.00  steps=  6  placed=  6  ε=0.184  loss=1243.6218
+2026-08-03 13:22:45,470 [INFO] [Ep   5000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=  200.00  steps=  6  placed=  6  ε=0.179  loss=1568.1287
+2026-08-03 13:22:56,902 [INFO] [Ep   5100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 12  placed=  3  ε=0.174  loss=1971.9193
+2026-08-03 13:23:09,236 [INFO] [Ep   5200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=    0.00  steps=  6  placed=  6  ε=0.169  loss=1485.5115
+2026-08-03 13:23:20,930 [INFO] [Ep   5300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -250.00  steps=  8  placed=  6  ε=0.164  loss=1637.8668
+2026-08-03 13:23:33,598 [INFO] [Ep   5400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -300.00  steps=  8  placed=  6  ε=0.160  loss=1571.6714
+2026-08-03 13:23:45,728 [INFO] [Ep   5500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 14  placed=  4  ε=0.155  loss=1407.8730
+2026-08-03 13:23:59,828 [INFO] [Ep   5600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -650.00  steps= 10  placed=  6  ε=0.151  loss=1763.8200
+2026-08-03 13:24:16,372 [INFO] [Ep   5700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -350.00  steps=  7  placed=  6  ε=0.147  loss=1306.6349
+2026-08-03 13:24:30,567 [INFO] [Ep   5800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=   70.00  steps=  7  placed=  6  ε=0.143  loss=1199.8905
+2026-08-03 13:24:46,054 [INFO] [Ep   5900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1073.33  steps= 18  placed=  5  ε=0.140  loss=1329.8105
+2026-08-03 13:25:02,342 [INFO] [Ep   6000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1000.00  steps= 16  placed=  6  ε=0.136  loss=1630.6960
+2026-08-03 13:25:16,767 [INFO] [Ep   6100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=  100.00  steps=  6  placed=  6  ε=0.133  loss=1524.6642
+2026-08-03 13:25:31,795 [INFO] [Ep   6200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -250.00  steps=  6  placed=  6  ε=0.130  loss=1003.0584
+2026-08-03 13:25:48,186 [INFO] [Ep   6300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1083.33  steps= 17  placed=  5  ε=0.126  loss=1615.3454
+2026-08-03 13:26:02,978 [INFO] [Ep   6400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1046.67  steps= 15  placed=  4  ε=0.123  loss=1954.2618
+2026-08-03 13:26:18,912 [INFO] [Ep   6500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1043.33  steps= 17  placed=  5  ε=0.121  loss=1554.5450
+2026-08-03 13:26:36,347 [INFO] [Ep   6600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -260.00  steps=  9  placed=  6  ε=0.118  loss=2199.5145
+2026-08-03 13:26:54,116 [INFO] [Ep   6700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1080.00  steps= 15  placed=  3  ε=0.115  loss=1440.4483
+2026-08-03 13:27:11,613 [INFO] [Ep   6800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1133.33  steps=  8  placed=  5  ε=0.113  loss=1328.5436
+2026-08-03 13:27:27,284 [INFO] [Ep   6900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.110  loss=1696.0257
+2026-08-03 13:27:44,288 [INFO] [Ep   7000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -200.00  steps=  6  placed=  6  ε=0.108  loss=910.1945
+2026-08-03 13:27:58,270 [INFO] [Ep   7100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1083.33  steps= 13  placed=  5  ε=0.106  loss=1908.0795
+2026-08-03 13:28:12,272 [INFO] [Ep   7200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1053.33  steps= 18  placed=  5  ε=0.103  loss=1783.3098
+2026-08-03 13:28:28,998 [INFO] [Ep   7300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -490.00  steps=  9  placed=  6  ε=0.101  loss=1562.2572
+2026-08-03 13:28:44,802 [INFO] [Ep   7400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -250.00  steps=  7  placed=  6  ε=0.099  loss=2276.9855
+2026-08-03 13:29:01,271 [INFO] [Ep   7500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1040.00  steps=  9  placed=  3  ε=0.097  loss=1741.4461
+2026-08-03 13:29:15,901 [INFO] [Ep   7600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -500.00  steps=  8  placed=  6  ε=0.095  loss=2630.5386
+2026-08-03 13:29:30,926 [INFO] [Ep   7700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1333.33  steps= 16  placed=  5  ε=0.094  loss=1675.6535
+2026-08-03 13:29:46,137 [INFO] [Ep   7800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 15  placed=  4  ε=0.092  loss=2359.8576
+2026-08-03 13:30:00,370 [INFO] [Ep   7900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 14  placed=  4  ε=0.090  loss=1677.0890
+2026-08-03 13:30:17,738 [INFO] [Ep   8000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.089  loss=2050.2321
+2026-08-03 13:30:36,110 [INFO] [Ep   8100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -390.00  steps= 10  placed=  6  ε=0.087  loss=2211.4938
+2026-08-03 13:30:52,990 [INFO] [Ep   8200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.086  loss=1746.7716
+2026-08-03 13:31:06,859 [INFO] [Ep   8300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.084  loss=2230.3452
+2026-08-03 13:31:24,448 [INFO] [Ep   8400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.083  loss=2887.2646
+2026-08-03 13:31:40,772 [INFO] [Ep   8500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1016.67  steps= 15  placed=  4  ε=0.082  loss=1750.7924
+2026-08-03 13:31:55,379 [INFO] [Ep   8600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=   50.00  steps=  7  placed=  6  ε=0.080  loss=2241.9087
+2026-08-03 13:32:09,445 [INFO] [Ep   8700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=  100.00  steps=  6  placed=  6  ε=0.079  loss=1224.1767
+2026-08-03 13:32:25,931 [INFO] [Ep   8800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1033.33  steps= 16  placed=  5  ε=0.078  loss=3418.1431
+2026-08-03 13:32:40,372 [INFO] [Ep   8900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.077  loss=2387.6747
+2026-08-03 13:32:58,980 [INFO] [Ep   9000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1100.00  steps= 15  placed=  3  ε=0.076  loss=2970.6758
+2026-08-03 13:33:14,714 [INFO] [Ep   9100] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1003.33  steps= 17  placed=  5  ε=0.075  loss=2867.3671
+2026-08-03 13:33:32,493 [INFO] [Ep   9200] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1066.67  steps= 16  placed=  4  ε=0.074  loss=2188.3484
+2026-08-03 13:33:49,799 [INFO] [Ep   9300] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -250.00  steps=  8  placed=  6  ε=0.073  loss=2120.8018
+2026-08-03 13:34:09,457 [INFO] [Ep   9400] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1068.00  steps= 15  placed=  3  ε=0.072  loss=2130.9417
+2026-08-03 13:34:28,563 [INFO] [Ep   9500] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1010.00  steps= 14  placed=  3  ε=0.071  loss=2849.4924
+2026-08-03 13:34:47,231 [INFO] [Ep   9600] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1060.00  steps= 15  placed=  3  ε=0.070  loss=1895.4637
+2026-08-03 13:35:07,010 [INFO] [Ep   9700] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1060.00  steps= 17  placed=  3  ε=0.070  loss=1952.5190
+2026-08-03 13:35:25,753 [INFO] [Ep   9800] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -200.00  steps=  7  placed=  6  ε=0.069  loss=3899.6264
+2026-08-03 13:35:42,726 [INFO] [Ep   9900] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R=-1040.00  steps= 17  placed=  3  ε=0.068  loss=2297.5458
+2026-08-03 13:36:01,239 [INFO] [Ep  10000] ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb R= -100.00  steps=  8  placed=  6  ε=0.067  loss=3286.7019
+2026-08-03 13:36:02,270 [INFO] Best layout exported: ./result\best_layout\ran-pang-airlink-86231b34--开关小板-883285b3_best.json (ep=3790, R=200.00)
+2026-08-03 13:36:02,271 [INFO] ==================================================
+2026-08-03 13:36:02,271 [INFO] PCB 训练完成: ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb
+2026-08-03 13:36:02,271 [INFO]   元件数: 6
+2026-08-03 13:36:02,271 [INFO]   前 20% 平均 R: -1030.94
+2026-08-03 13:36:02,273 [INFO]   后 20% 平均 R: -903.04
+2026-08-03 13:36:02,273 [INFO]   最终 5 轮 R: ['-530.0', '-1066.7', '-50.0', '-50.0', '-100.0']
+2026-08-03 13:36:02,274 [INFO]   前 20% 平均 placed: 3.1
+2026-08-03 13:36:02,274 [INFO]   后 20% 平均 placed: 4.0
+2026-08-03 13:36:02,274 [INFO]   最佳 R: 200.00 (ep 3790)
+2026-08-03 13:36:02,276 [INFO]   汇总已保存: ./result\training_summary.json
+2026-08-03 13:36:02,276 [INFO] ==================================================
+2026-08-03 13:36:02,277 [INFO] 全部训练完成 — 最终汇总
+2026-08-03 13:36:02,277 [INFO]   ran-pang-airlink-86231b34--开关小板-883285b3  R:  -1030.9 →   -903.0 ↑  placed:   3.1 →   4.0  best_R=200.0
+2026-08-03 13:36:02,277 [INFO] 日志文件: ./result\training_log.txt
+2026-08-03 13:36:02,277 [INFO] 汇总 JSON: ./result\training_summary.json
+2026-08-03 13:36:02,277 [INFO] 最佳布局: ./result\best_layout/

@@ -1,0 +1,12 @@
+[
+  {
+    "pcb": "ran-pang-airlink-86231b34--开关小板-883285b3.kicad_pcb",
+    "n_movable": 6,
+    "best_reward": 200.00000000000003,
+    "best_episode": 3790,
+    "first_avg_r": -1030.9396490666647,
+    "last_avg_r": -903.0446666666733,
+    "first_avg_placed": 3.127,
+    "last_avg_placed": 3.967
+  }
+]

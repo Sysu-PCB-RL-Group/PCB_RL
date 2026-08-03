@@ -1,6 +1,7 @@
-"""DQN 网络：5-Head 自回归结构。
+"""DQN 网络：5-Head 自回归结构 + Dict 观测 + 共享 Slot Encoder。
 
-基于 SPEC v2.2 §4.4。
+基于 SPEC v2.3：Dict 观测 → slot encoder (共享权重) → 分支。
+Step 0 直接走 per-slot head，Step 1-4 走 mean pooling + shared body。
 """
 
 import torch
@@ -8,49 +9,80 @@ import torch.nn as nn
 
 
 class DQN(nn.Module):
-    """5-Head 自回归 DQN 网络。
+    """5-Head 自回归 DQN，接收 Dict 观测。
 
-    Shared 3 层 MLP Body → 5 个独立 Linear Head，
-    每次 forward 只走一个 Head，其余 Head 不在计算图上。
+    观测结构:
+      component_slots: (batch, MAX_MOVABLE, 8)
+      global_features: (batch, 8)
+
+    架构:
+      Slot Encoder (共享 Linear(8, 16))
+        ├── Step 0: head_comp(Linear(16, 1)) → per-slot Q
+        └── Step 1-4: mean_pool + concat(global) → shared body → 4 heads
     """
 
-    def __init__(self, obs_dim: int, n_movable: int, grid_w: int, grid_h: int):
+    def __init__(self, slot_dim: int = 8, slot_enc_dim: int = 16,
+                 n_movable: int = 384, grid_w: int = 512, grid_h: int = 512):
         """初始化网络。
 
         Args:
-            obs_dim: 观测维度 (N_movable*8 + N_movable + 4)
-            n_movable: 可移动元件数
-            grid_w: 网格宽度
-            grid_h: 网格高度
+            slot_dim: 每个元件 slot 的特征维度 (8)
+            slot_enc_dim: slot encoder 输出维度 (16)
+            n_movable: Head 0 输出维度 (固定 = MAX_MOVABLE)
+            grid_w: Head 1 输出维度 (固定 = GRID_W)
+            grid_h: Head 2 输出维度 (固定 = GRID_H)
         """
         super().__init__()
 
-        # 共享 Body：3 层 MLP
+        # Slot encoder: 对所有 slot 共享权重
+        self.slot_encoder = nn.Linear(slot_dim, slot_enc_dim)
+
+        # Head 0: 对每个 slot 独立打分 → Q 值
+        self.head_comp = nn.Linear(slot_enc_dim, 1)
+
+        # Shared body (step 1-4): pooled_slot(16) + global(8) = 24 → 256 → 128
+        shared_in = slot_enc_dim + 8
         self.shared = nn.Sequential(
-            nn.Linear(obs_dim, 512), nn.ReLU(),
-            nn.Linear(512, 256), nn.ReLU(),
+            nn.Linear(shared_in, 256), nn.ReLU(),
             nn.Linear(256, 128), nn.ReLU(),
         )
 
-        # 5 个独立 Head（每步一个）
-        self.head_comp = nn.Linear(128, n_movable)   # Step 0: 选元件
-        self.head_x1   = nn.Linear(128, grid_w)       # Step 1: 选 x1
-        self.head_y1   = nn.Linear(128, grid_h)       # Step 2: 选 y1
-        self.head_rot  = nn.Linear(128, 4)            # Step 3: 选旋转
-        self.head_lay  = nn.Linear(128, 2)            # Step 4: 选层
+        # Head 1-4: 离散动作
+        self.head_x1 = nn.Linear(128, grid_w)
+        self.head_y1 = nn.Linear(128, grid_h)
+        self.head_rot = nn.Linear(128, 4)
+        self.head_lay = nn.Linear(128, 2)
 
-        self._heads = [self.head_comp, self.head_x1,
-                       self.head_y1, self.head_rot, self.head_lay]
-
-    def forward(self, obs: torch.Tensor, step_id: int) -> torch.Tensor:
-        """前向传播：共享 Body → 指定 Head。
+    def forward(self, obs: dict, step_id: int) -> torch.Tensor:
+        """前向传播。
 
         Args:
-            obs: 观测向量 shape=(batch, obs_dim)
-            step_id: 子步骤编号 0-4
+            obs: dict with "component_slots" (B, N_slot, 8) and "global_features" (B, 8)
+            step_id: 子步骤 0-4
 
         Returns:
-            Q 值向量 shape=(batch, head_output_dim)
+            Q 值向量
+              step_id=0 → (B, N_slot)
+              step_id=1 → (B, GRID_W)
+              step_id=2 → (B, GRID_H)
+              step_id=3 → (B, 4)
+              step_id=4 → (B, 2)
         """
-        x = self.shared(obs)
-        return self._heads[step_id](x)
+        slots = obs["component_slots"]        # (B, N_slot, 8)
+        global_f = obs["global_features"]     # (B, 8)
+        B = slots.shape[0]
+
+        # Slot encoder (共享，逐 slot)
+        slot_feat = self.slot_encoder(slots)  # (B, N_slot, 16)
+
+        if step_id == 0:
+            # Per-slot Q → (B, N_slot)
+            return self.head_comp(slot_feat).squeeze(-1)
+
+        # Step 1-4: mean pool → concat global → shared body → head
+        pooled = slot_feat.mean(dim=1)        # (B, 16)
+        x = torch.cat([pooled, global_f], dim=-1)  # (B, 24)
+        x = self.shared(x)                    # (B, 128)
+
+        heads = [None, self.head_x1, self.head_y1, self.head_rot, self.head_lay]
+        return heads[step_id](x)
