@@ -106,10 +106,25 @@ class Runner:
 
         for file_path in pcb_files:
             pcb_name = os.path.basename(file_path)
-            logger.info(f"===== Training on: {pcb_name} =====")
 
-            env = self._create_env(file_path)
             try:
+                env = self._create_env(file_path)
+            except (ValueError, RuntimeError) as e:
+                # 空板/缺陷板/加载失败：跳过不参与训练
+                logger.warning(f"跳过无法加载的板: {pcb_name}: {e}")
+                continue
+
+            try:
+                # C1: 内容校验——过滤空板/纯机械板（N_movable≥1 且网络数≥1）
+                # 否则 DQN 空动作空间（mask 全 False）会导致训练崩
+                if env.N_movable < 1 or len(env.kicad.nets) < 1:
+                    logger.warning(
+                        f"跳过非电路板: {pcb_name} "
+                        f"(N_movable={env.N_movable}, nets={len(env.kicad.nets)})"
+                    )
+                    continue
+
+                logger.info(f"===== Training on: {pcb_name} =====")
                 agent, buffer = self._init_agent_and_buffer(env)
 
                 self.pcb_episode_num = 0

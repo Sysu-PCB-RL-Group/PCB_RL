@@ -30,6 +30,40 @@ else:
         print(f"[WARN] KiCad 加载失败 ({KICAD_PATH}): {e}")
         print("       Mock 模式仍可用，训练前请确认 KICAD_PATH 正确")
 
+# ===================== 固定元件启发式 =====================
+
+# 立创/EasyEDA 导出的 footprint 从不置 lock，RL 无锚点。
+# 固定判定（见 _cache_components）：
+#   1. 文件锁标记 IsLocked()               —— 真实锁定，最高优先
+#   2. 0 网络连接（机械件：螺丝/铜柱/定位点）—— 数据实锤，无电气功能
+#   3. 封装名关键词                         —— 默认仅机械锚点
+#
+# 连接器(HDR/CONN/USB/PIN) 和大 IC(BGA/QFP) 默认【不固定】——
+# 它们是 RL 该优化放置的对象（reward 里还有"大元件优先"）。
+# 如需固定，把对应开关改为 True 即可。
+_FIXED_FOOTPRINT_KEYWORDS = ("HOLE", "MOUNT", "MECH", "FIDUCIAL")
+_FIX_CONNECTORS = False          # True → 额外固定连接器 HDR/CONN/PIN/SOCKET/USB
+_FIX_LARGE_ICS = False           # True → 额外固定大 IC BGA/QFP
+_CONNECTOR_KEYWORDS = ("HDR", "CONN", "PIN", "SOCKET", "USB")
+_LARGE_IC_KEYWORDS = ("BGA", "QFP")
+
+
+def _is_fixed_footprint(footprint_name: str) -> bool:
+    """按封装名关键词判定元件是否应固定为锚点。
+
+    默认仅机械锚点（HOLE/MOUNT/MECH/FIDUCIAL）；
+    连接器和大 IC 默认可动，通过 _FIX_CONNECTORS/_FIX_LARGE_ICS 开启。
+    """
+    upper = footprint_name.upper()
+    if any(k in upper for k in _FIXED_FOOTPRINT_KEYWORDS):
+        return True
+    if _FIX_CONNECTORS and any(k in upper for k in _CONNECTOR_KEYWORDS):
+        return True
+    if _FIX_LARGE_ICS and any(k in upper for k in _LARGE_IC_KEYWORDS):
+        return True
+    return False
+
+
 # ===================== 数据结构定义 =====================
 
 @dataclass
@@ -200,7 +234,14 @@ class KiCadUtils:
             else:
                 layer = 2
                 print(f"⚠️  元件 {reference} 位于非标准层 {layer_name}，编码为 2")
-            is_fixed = fp.IsLocked()
+            footprint_name = str(fp.GetFPID().GetLibItemName())
+            # 固定判定：文件锁 或 机械关键词 或 0 网络（数据实锤的机械件）
+            is_fixed = fp.IsLocked() or _is_fixed_footprint(footprint_name)
+            if not is_fixed:
+                # 0 网络连接 = 机械件（螺丝/铜柱/定位点/无 pad 图形件），固定零损失
+                pad_nets = {pad.GetNetname() for pad in fp.Pads() if pad.GetNetname()}
+                if not pad_nets:
+                    is_fixed = True
 
             # 封装尺寸（bbox）
             bbox = fp.GetBoundingBox()                           # pcbnew.BOX2I
@@ -215,7 +256,6 @@ class KiCadUtils:
             )
 
             # 封装类型编码
-            footprint_name = str(fp.GetFPID().GetLibItemName())
             package_type = self._classify_package_type(footprint_name)
 
             # 引脚信息（相对 AABB 左下角）
@@ -319,6 +359,7 @@ class KiCadUtils:
         if edge_cuts_id == -1:
             # 无 Edge.Cuts 层 → 用元器件边界替代
             if not self.components:
+                print("[WARN] 无 Edge.Cuts 且无元件，板框回退默认值 (0,0)~(100,80)")
                 self.board_bounds = ((0, 0), (100, 80))
                 return
             bboxes = [c.bbox for c in self.components.values()]
@@ -351,6 +392,12 @@ class KiCadUtils:
                 e = drawing.GetEnd()
                 all_vertices.append((pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)))
                 all_vertices.append((pcbnew.ToMM(e.x), pcbnew.ToMM(e.y)))
+            elif shape_type == "Rect":
+                # 矩形：取对角两点作为边界顶点（此前被跳过导致假板框）
+                s = drawing.GetStart()
+                e = drawing.GetEnd()
+                all_vertices.append((pcbnew.ToMM(s.x), pcbnew.ToMM(s.y)))
+                all_vertices.append((pcbnew.ToMM(e.x), pcbnew.ToMM(e.y)))
             elif shape_type in ("Bezier", "Curve"):
                 # 贝塞尔曲线：控制点 + 端点共同构成边界框
                 s = drawing.GetStart()
@@ -370,6 +417,7 @@ class KiCadUtils:
                         all_vertices.append((pcbnew.ToMM(pt.x), pcbnew.ToMM(pt.y)))
 
         if not all_vertices:
+            print("[WARN] Edge.Cuts 无有效形状，板框回退默认值 (0,0)~(100,80)")
             self.board_bounds = ((0, 0), (100, 80))
             return
         xs = [p[0] for p in all_vertices]
@@ -442,21 +490,35 @@ class KiCadUtils:
                     self.footprints[fp.GetReference()] = fp
 
             for ref, comp in components.items():
-                if comp.is_fixed:
+                # ① 只写 RL 放过的元件：固定 + 未放置都保持源坐标原封不动
+                if comp.is_fixed or not comp.is_placed:
                     continue
                 fp = self.footprints.get(ref)
                 if fp is None:
                     continue
 
-                # AABB → 中心点坐标 (mm → nm)
+                # ② 层守卫：非标准层（内层等）不移动、不写层
+                if comp.layer not in (0, 1):
+                    print(f"[WARN] {ref} 在非标准层 {comp.layer}，跳过导出")
+                    continue
+
+                # AABB → 目标中心点坐标 (mm)
                 cx = (comp.bbox[0] + comp.bbox[2]) / 2.0
                 cy = (comp.bbox[1] + comp.bbox[3]) / 2.0
-                fp.SetPosition(pcbnew.VECTOR2I(
-                    pcbnew.FromMM(cx), pcbnew.FromMM(cy)
-                ))
 
-                # 旋转
+                # ③ 位置写入：实测偏移反推参考点（非对称封装不产生系统偏移）
+                # 先定旋转 → 量该姿态下 bbox 中心相对参考点偏移 → 反推 SetPosition
+                # 注意：GetBoundingBox() 是缓存，SetOrientationDegrees 后不刷新；
+                #       必须用 GetBoundingHull().BBox()（实时反映旋转后的真实几何）
                 fp.SetOrientationDegrees(float(comp.rotation * 90))
+                bbox = fp.GetBoundingHull().BBox()
+                pos = fp.GetPosition()
+                off_x = (bbox.GetLeft() + bbox.GetRight()) / 2 - pos.x
+                off_y = (bbox.GetBottom() + bbox.GetTop()) / 2 - pos.y
+                fp.SetPosition(pcbnew.VECTOR2I(
+                    pcbnew.FromMM(cx) - round(off_x),
+                    pcbnew.FromMM(cy) - round(off_y),
+                ))
 
                 # 层
                 layer_name = "F.Cu" if comp.layer == 0 else "B.Cu"

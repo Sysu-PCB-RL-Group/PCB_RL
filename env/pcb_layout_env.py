@@ -195,6 +195,11 @@ class PCBLayoutEnv(gym.Env):
         self.movable_list = [c for c in self.kicad.components.values() if not c.is_fixed]
         self.N_movable = len(self.movable_list)
 
+        # 空板/缺陷板（0 可动元件）：不参与训练，抛可捕获异常由 run.py 跳过。
+        # 否则下方 spaces.Discrete(self.N_movable) 会因 Discrete(0) 崩溃。
+        if self.N_movable < 1:
+            raise ValueError(f"Non-circuit board (0 movable components): {pcb_path}")
+
         # 动作空间: 7 元 Tuple
         #   (component_id, x1, y1, x2, y2, rotation, layer)
         self.action_space = spaces.Tuple([

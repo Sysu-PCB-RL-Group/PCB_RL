@@ -84,6 +84,23 @@ def snapshot_state(env) -> Dict:
     }
 
 
+def _restore_state(env, state_snap: Dict):
+    """将最佳布局快照回填到 env 的实时元件，供导出 best_layout 使用。
+
+    Args:
+        env: PCBLayoutEnv 实例（其 kicad.components 会被就地修改）
+        state_snap: snapshot_state() 的返回值
+    """
+    for comp_data in state_snap["components"]:
+        comp = env.kicad.components.get(comp_data["id"])
+        if comp is None:
+            continue
+        comp.bbox = tuple(comp_data["bbox"])
+        comp.rotation = comp_data["rotation"]
+        comp.layer = comp_data["layer"]
+        comp.is_placed = comp_data["is_placed"]
+
+
 def _snapshot_to_viz_components(state_snap: Dict) -> list:
     """将 snapshot_state 输出转为 draw_layout 可用的元件对象列表。
 
@@ -388,19 +405,18 @@ def main():
     logger.info(f"PCB Layout Inference Demo — {pcb_name}")
     logger.info("=" * 60)
 
-    obs_dim = env.N_movable * 8 + env.N_movable + 4
-
     (min_x, min_y), (max_x, max_y) = env.board_bounds
     logger.info(
         f"Board: {max_x - min_x:.0f}×{max_y - min_y:.0f}mm, "
         f"N_movable={env.N_movable}, grid=({env.grid_width},{env.grid_height})"
     )
 
-    # ---- 创建 Agent（随机权重） ----
+    # ---- 创建 Agent（固定维度架构：Head 维度 = MAX 常量，与训练一致） ----
     device = torch.device("cpu")
     agent = DQNAgent(
-        obs_dim=obs_dim, n_movable=env.N_movable,
-        grid_w=env.grid_width, grid_h=env.grid_height,
+        n_movable=Config.MAX_MOVABLE,
+        grid_w=Config.GRID_W,
+        grid_h=Config.GRID_H,
         device=device,
         lr=Config.LEARNING_RATE, gamma=Config.GAMMA,
     )
@@ -408,7 +424,10 @@ def main():
         agent.load(args.model)
         logger.info(f"Agent created + loaded weights from: {args.model}")
     else:
-        logger.info(f"Agent created (random weights): obs_dim={obs_dim}")
+        logger.info(
+            f"Agent created (random weights): "
+            f"slots={Config.MAX_MOVABLE}×8, grid=({Config.GRID_W},{Config.GRID_H})"
+        )
 
     # ---- 推理循环（搜索阶段，不生成步骤图） ----
     MAX_ATTEMPTS = args.max_attempts
@@ -461,11 +480,23 @@ def main():
 
     # ---- 输出（全部放入 output/<pcb_name>/ 目录） ----
 
-    # 4a. 导出 .kicad_pcb（唯一必要输出）
-    export_path = os.path.abspath(args.export) if args.export else \
-        os.path.join(pcb_output_dir, "best_layout.kicad_pcb")
-    logger.info(f"Exporting layout to: {export_path}")
-    env.kicad.export_layout(export_path, env.kicad.components)
+    # ④ 导出两份 PCB：先 final（活 env = 最后一集），后 best（回填 best_state）。
+    # 顺序不能反：final 必须用活 env 导出，回填后再导 best。
+    logger.info(
+        f"Best: episode={best_episode}, reward={best_reward:.1f}, all_placed={all_completed}"
+    )
+
+    final_path = os.path.abspath(args.export) if args.export else \
+        os.path.join(pcb_output_dir, "final_output.kicad_pcb")
+    logger.info(f"Exporting final layout (last episode) to: {final_path}")
+    env.kicad.export_layout(final_path, env.kicad.components)
+
+    if best_state is not None:
+        # ⑤ 回填 best 快照后导出 best_layout
+        _restore_state(env, best_state)
+        best_path = os.path.join(pcb_output_dir, "best_layout.kicad_pcb")
+        logger.info(f"Exporting best layout to: {best_path}")
+        env.kicad.export_layout(best_path, env.kicad.components)
 
     # ---- 以下为调试输出（仅在 --debug 时生成） ----
     if args.debug:
