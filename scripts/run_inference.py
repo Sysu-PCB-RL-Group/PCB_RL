@@ -203,30 +203,36 @@ def run_inference_episode(
     env.reset()
     env._reset_pending()
     env.current_episode = 99999  # 推理时使用完整版 reward（quality_scale=1.0）
-    Config.EARLY_STOP_THRESHOLD = float("-inf")  # 推理不早停：必定放完所有元件
     done = False
     episode_reward = 0.0
     step_count = 0
     placed_count = 0
     action_history = []
 
+    # 微量 epsilon 打破确定性死锁：
+    # 未放置元件的 slot 全为零 → slot_encoder 输出相同 → argmax 总选索引最小的元件。
+    # 若该位置与已放置元件冲突 → obs 不变 → 相同决策 → 无限循环直到 MAX_STEPS。
+    # 训练 epsilon_min=0.15 掩盖了此问题，推理 epsilon=0 完全暴露。
+    INFERENCE_EPSILON = 0.01
+
     while not done:
-        # ---- 5 步自回归（纯推理：epsilon=0） ----
+        # ---- 5 步自回归（推理：微量 epsilon 打破死锁） ----
         for step_id in range(5):
-            # 仅 step 0 需要掩码（筛选已放置元件）
-            mask = env._build_mask_for_step(step_id) if step_id == 0 else None
+            mask = env._build_mask_for_step(step_id)
             obs = env._get_obs_with_pending(step_id)
-            action = agent.select_action(obs, mask, step_id, epsilon=0.0)
+            action = agent.select_action(obs, mask, step_id, epsilon=INFERENCE_EPSILON)
             env._update_pending(action, step_id)
 
         # ---- env.step()（C3-5 保底：clamp 坐标到板框内） ----
         full_action = env._assemble_action()
         full_action = _clamp_action_to_board(env, *full_action)
+        prev_placed = placed_count
         obs_next, reward, terminated, truncated, info = env.step(full_action)
         done = terminated or truncated
         episode_reward += reward
         step_count += 1
         placed_count = info.get("placed_count", 0)
+        is_placed = placed_count > prev_placed  # 准确：placed_list 增加了才算成功
 
         # 记录行动历史
         comp = env.movable_list[full_action[0]]
@@ -239,22 +245,21 @@ def run_inference_episode(
             "rot": full_action[5],
             "lay": full_action[6],
             "reward": reward,
-            "is_placed": info.get("hard_overlap", 0) == 0 and info.get("out_of_bounds", 0) == 0,
+            "is_placed": is_placed,
         })
 
         env._reset_pending()
 
-        # ---- 中间步骤可视化（每放完一个元件拍一张） ----
-        if step_img_dir is not None:
+        # ---- 中间步骤可视化（仅成功放置时拍一张） ----
+        if step_img_dir is not None and is_placed:
             state_snap = snapshot_state(env)
             viz_comps = _snapshot_to_viz_components(state_snap)
             board_bounds = (
                 (state_snap["board_bounds"]["min_x"], state_snap["board_bounds"]["min_y"]),
                 (state_snap["board_bounds"]["max_x"], state_snap["board_bounds"]["max_y"]),
             )
-            pad = len(str(env.N_movable))
-            step_path = os.path.join(step_img_dir, f"step_{step_count:0{pad}d}.png")
-            title = f"Step {step_count} — {comp.id}  |  Reward={episode_reward:.1f}"
+            step_path = os.path.join(step_img_dir, f"step_{placed_count:02d}.png")
+            title = f"Step {placed_count} — {comp.id}  |  Reward={episode_reward:.1f}"
             from utils.visualization import draw_layout
             draw_layout(viz_comps, board_bounds, step_path, title=title)
 
@@ -283,8 +288,9 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
 
     pad = len(str(env.N_movable))
     cumulative_reward = 0.0
+    placed_num = 0  # 只对成功放置的步骤计数
 
-    for i, act in enumerate(best_actions):
+    for act in best_actions:
         comp_idx = comp_id_to_idx[act["comp_id"]]
         full_action = (
             comp_idx,
@@ -298,18 +304,22 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
         env._reset_pending()
         cumulative_reward += reward
 
-        # 生成步骤图
+        # 仅成功放置时生成步骤图
+        if not act.get("is_placed", False):
+            continue
+
+        placed_num += 1
         state_snap = snapshot_state(env)
         viz_comps = _snapshot_to_viz_components(state_snap)
         board_bounds = (
             (state_snap["board_bounds"]["min_x"], state_snap["board_bounds"]["min_y"]),
             (state_snap["board_bounds"]["max_x"], state_snap["board_bounds"]["max_y"]),
         )
-        step_path = os.path.join(step_img_dir, f"step_{i+1:0{pad}d}.png")
-        title = f"Step {i+1} — {act['comp_id']}  |  Reward={cumulative_reward:.1f}"
+        step_path = os.path.join(step_img_dir, f"step_{placed_num:0{pad}d}.png")
+        title = f"Step {placed_num} — {act['comp_id']}  |  Reward={cumulative_reward:.1f}"
         draw_layout(viz_comps, board_bounds, step_path, title=title)
 
-    logger.info(f"[Replay] {len(best_actions)} step images saved to {step_img_dir}")
+    logger.info(f"[Replay] {placed_num} step images saved to {step_img_dir}")
 
 
 # ==================== 主流程 ====================
@@ -384,14 +394,14 @@ def main():
 
     Config = _C
 
-    # ---- 清理同板框旧 output ----
-    pcb_output_dir = os.path.join(OUTPUT_DIR, pcb_name)
-    if os.path.isdir(pcb_output_dir):
-        import shutil
-        shutil.rmtree(pcb_output_dir)
-        logger.info(f"Cleaned old output: {pcb_output_dir}")
+    # ---- 清理所有旧 output ----
+    import shutil
+    if os.path.isdir(OUTPUT_DIR):
+        shutil.rmtree(OUTPUT_DIR)
+        logger.info(f"Cleaned old output: {OUTPUT_DIR}")
 
     # ---- 创建输出目录 ----
+    pcb_output_dir = os.path.join(OUTPUT_DIR, pcb_name)
     os.makedirs(pcb_output_dir, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -439,9 +449,11 @@ def main():
 
     start_time = time.time()
 
-    for ep in range(1, MAX_ATTEMPTS + 1):
-        env.W_OUT_OF_BOUNDS_CURRENT = Config.W_OUT_OF_BOUNDS_INITIAL
+    # 推理阶段全局配置（只设置一次，避免在每 episode 内反复修改全局状态）
+    Config.EARLY_STOP_THRESHOLD = float("-inf")  # 推理不早停
+    env.W_OUT_OF_BOUNDS_CURRENT = Config.W_OUT_OF_BOUNDS_INITIAL
 
+    for ep in range(1, MAX_ATTEMPTS + 1):
         ep_reward, ep_steps, ep_placed, actions = run_inference_episode(env, agent)
 
         # 追踪最佳布局（按 reward 最高）

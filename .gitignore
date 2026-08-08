@@ -23,8 +23,8 @@ venv/
 # Generated output (推理产物)
 output/
 
-# Training checkpoints
-result/
+# Training checkpoints & output
+result*/
 *.pt
 
 # Test artifacts

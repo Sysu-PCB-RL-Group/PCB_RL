@@ -1,7 +1,10 @@
 """DQN Agent：epsilon-greedy 选择 + 按 step_id 路由学习 + target 同步。
 
 基于 SPEC v2.3：Dict 观测 + 共享 slot encoder 网络。
-Target 端掩码（nsid=0）：从 component_slots[:,:,0] 提取 placed_flag 屏蔽已放置元件。
+Target 端掩码与 Actor 侧对称：
+  nsid=0: placed_flag 屏蔽已放置元件
+  nsid=1: grid_width 屏蔽越界 x1 坐标
+  nsid=2: grid_height 屏蔽越界 y1 坐标
 """
 
 import random
@@ -15,6 +18,7 @@ import torch.optim as optim
 
 from .network import DQN
 from .replay_buffer import ReplayBuffer
+from env.pcb_layout_env import Config
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +126,14 @@ class DQNAgent:
             q_values = self.q_net(obs_tensor, step_id).squeeze(0)
             mask_tensor = torch.tensor(mask, dtype=torch.bool).to(self.device)
             q_values[~mask_tensor] = -float('inf')
-            return int(q_values.argmax().item())
+            # 打破平局：多个动作 Q 值相同时随机选择，避免确定性死锁
+            # （例如所有未放置元件 slot 全为零 → Q 值完全相等 → 每次都选同一个）
+            max_q = q_values.max()
+            tied = (q_values == max_q)
+            tied_indices = tied.nonzero(as_tuple=True)[0]
+            if tied_indices.numel() > 1:
+                return int(tied_indices[torch.randint(0, len(tied_indices), (1,))].item())
+            return int(tied_indices[0].item())
 
     def learn(self, batch) -> float:
         """从 mini-batch 学习，按 next_step_id 路由目标 Q 网络。
@@ -130,8 +141,11 @@ class DQNAgent:
         Q-Learning 目标：
             target = r + γ * max_{a'} Q_target(s', a', next_step_id) * (1 - done)
 
-        Target 端掩码：仅 next_step_id=0 时从 component_slots 提取 placed_flag
-        构建掩码，屏蔽已放置元件的虚高 Q 值。
+        Target 端掩码（与 Actor 侧对称）：
+            nsid=0: component_slots[:,:,0] → placed_flag 屏蔽已放置元件
+            nsid=1: global_features[0] → grid_width 屏蔽越界 x1 坐标
+            nsid=2: global_features[1] → grid_height 屏蔽越界 y1 坐标
+            nsid=3/4: 无需掩码（全合法）
 
         Args:
             batch: ReplayBuffer.sample() 返回的 8 元组
@@ -163,8 +177,7 @@ class DQNAgent:
             q_all = self.q_net(sub_obs, sid)
             q_vals[idx] = q_all.gather(1, actions_tensor[idx])
 
-        # 目标 Q 值：按 next_step_id 分组走对应 Head
-        # next_step_id=0 时掩码（屏蔽已放置元件），其余不掩码
+        # 目标 Q 值：按 next_step_id 分组走对应 Head，同步 Actor 侧 mask
         target_q = torch.zeros(batch_size, 1, device=self.device)
         with torch.no_grad():
             for nsid in range(5):
@@ -184,6 +197,22 @@ class DQNAgent:
                     comp_mask = (placed_flags < 0.5).to(self.device)  # True=未放置=可选
                     if comp_mask.any():
                         next_q_all[~comp_mask] = -float('inf')
+
+                elif nsid == 1:
+                    # x1 坐标掩码：屏蔽超出真实网格宽度的坐标
+                    # global_features[0] = grid_width / GRID_W
+                    grid_w = (sub_next["global_features"][:, 0] * Config.GRID_W).round().long()
+                    x_mask = torch.arange(Config.GRID_W, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
+                    if x_mask.any():
+                        next_q_all[~x_mask] = -float('inf')
+
+                elif nsid == 2:
+                    # y1 坐标掩码：屏蔽超出真实网格高度的坐标
+                    # global_features[1] = grid_height / GRID_H
+                    grid_h = (sub_next["global_features"][:, 1] * Config.GRID_H).round().long()
+                    y_mask = torch.arange(Config.GRID_H, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
+                    if y_mask.any():
+                        next_q_all[~y_mask] = -float('inf')
 
                 target_q[ns_idx] = next_q_all.max(1)[0].unsqueeze(1)
 

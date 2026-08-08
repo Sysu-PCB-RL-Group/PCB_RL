@@ -3,6 +3,7 @@
 基于 SPEC v2.2 §4.5、§10。
 """
 
+import glob
 import logging
 import json
 import math
@@ -86,9 +87,9 @@ class Runner:
 
     def run(self):
         """主训练循环。"""
-        # 文件日志（离线查看用）
+        # 文件日志（离线查看用，每次训练覆盖旧日志）
         log_path = os.path.join(self.save_dir, "training_log.txt")
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
         file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(file_handler)
         logger.info(f"Log file: {log_path}")
@@ -129,6 +130,18 @@ class Runner:
 
                 self.pcb_episode_num = 0
                 self._backup_previous_results(pcb_name)
+
+                # ---- 预热期：纯探索收集经验，不学习，不计入 episode 计数 ----
+                if Config.WARMUP_EPISODES > 0:
+                    logger.info(
+                        f"Warming up: {Config.WARMUP_EPISODES} ep "
+                        f"(pure exploration, ε=1.0, no learning)"
+                    )
+                    for _ in range(Config.WARMUP_EPISODES):
+                        self._run_episode(env, agent, buffer, pcb_name, learn=False)
+                    logger.info(f"Warmup complete ({len(buffer)} transitions in buffer)")
+
+                # ---- 正式训练 ----
                 pcb_best_reward = float("-inf")
                 pcb_best_state = None
                 pcb_best_episode = -1
@@ -191,8 +204,9 @@ class Runner:
     def _run_episode(
         self, env: PCBLayoutEnv, agent: DQNAgent,
         buffer: ReplayBuffer, pcb_name: str,
+        learn: bool = True,
     ):
-        """执行单个 episode：5 步自回归 + 每步 learn + 写入 buffer。
+        """执行单个 episode：5 步自回归 + 写入 buffer（+ 可选 learn）。
 
         DQN 是 off-policy 算法，在当前策略收集数据的同时从 replay buffer
         采样历史 transition 进行 Q-learning。训练粒度 = 每个 env step 后。
@@ -202,6 +216,7 @@ class Runner:
             agent: DQN Agent
             buffer: 经验回放缓冲区
             pcb_name: PCB 文件名（用于 checkpoint 命名）
+            learn: 是否执行学习（预热期 = False）
 
         Returns:
             (total_reward, step_count, placed_count, avg_loss)
@@ -225,49 +240,50 @@ class Runner:
             transitions = []  # [(obs, action, mask, step_id), ...]
 
             for step_id in range(5):
-                # 仅 step 0 需要掩码（筛选已放置元件）
-                mask = env._build_mask_for_step(step_id) if step_id == 0 else None
+                mask = env._build_mask_for_step(step_id)
                 obs_with_pending = env._get_obs_with_pending(step_id)
                 action = agent.select_action(obs_with_pending, mask, step_id, epsilon)
                 env._update_pending(action, step_id)
                 transitions.append((obs_with_pending, action, mask, step_id))
 
-            # ---- 组装 7 元动作 → env.step() ----
+            # ---- 组装 7 元动作 → C3-5 clamp → env.step() ----
             full_action = env._assemble_action()
+            # 与推理保持一致：将坐标 clamp 至 valid_area，避免越界浪费 step
+            from scripts.run_inference import _clamp_action_to_board
+            full_action = _clamp_action_to_board(env, *full_action)
             obs_next, reward, terminated, truncated, _info = env.step(full_action)
             done = terminated or truncated
             episode_reward += reward
             step_count += 1
             placed_count = _info.get("placed_count", 0)
 
-            # ---- 写入 buffer（共享 reward，中间步 reward=0） ----
+            # ---- 写入 buffer（5 步按比例共享 reward） ----
+            share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]  # 选元件/x1/y1/旋转/层
             for i, (s, a, mask, sid) in enumerate(transitions):
                 # 确定 next_obs 和 next_step_id
                 if sid < 4:
-                    # step 0-3: 下个状态是下一个子步骤的观测
-                    next_s = transitions[i + 1][0]  # 下条 transition 的 obs
+                    next_s = transitions[i + 1][0]
                     next_sid = sid + 1
                     step_done = False
                 else:
-                    # step 4: 下个状态是 env 返回的布局观测（pending 已重置）
                     next_s = obs_next
                     next_sid = 0 if not done else -1
                     step_done = done
 
-                # 仅 step 4 获得环境 reward，中间步 reward=0
-                step_reward = reward if sid == 4 else 0.0
+                step_reward = reward * share_weights[sid]
 
                 buffer.add(s, a, step_reward, next_s, mask, step_done, sid, next_sid)
 
-            # ---- 每步 learn：buffer 攒够就采样训练 ----
-            if buffer.is_ready(Config.BATCH_SIZE):
-                batch = buffer.sample(Config.BATCH_SIZE)
-                loss = agent.learn(batch)
-                losses.append(loss)
+            # ---- 每步 learn（预热期跳过） ----
+            if learn:
+                if buffer.is_ready(Config.BATCH_SIZE):
+                    batch = buffer.sample(Config.BATCH_SIZE)
+                    loss = agent.learn(batch)
+                    losses.append(loss)
 
-                # 定期同步 target 网络
-                if agent.train_steps % Config.TARGET_UPDATE_FREQ == 0:
-                    agent.sync_target()
+                    # 定期同步 target 网络
+                    if agent.train_steps % Config.TARGET_UPDATE_FREQ == 0:
+                        agent.sync_target()
 
             # 重置 pending，准备下一颗元件放置
             env._reset_pending()
@@ -281,8 +297,8 @@ class Runner:
         """跨 episode 指数衰减 epsilon（per-PCB 独立计数）。
 
         曲线：前期快速下降（高探索→利用过渡），后期平缓（精细调优）。
-        公式：epsilon = EPSILON_MIN + (EPSILON_START - EPSILON_MIN) * exp(-4 * t / Emax)
-        其中 k=4 保证在 total_episodes 结束时 epsilon 接近 EPSILON_MIN。
+        公式：epsilon = EPSILON_MIN + (EPSILON_START - EPSILON_MIN) * exp(-4 * t / E_decay)
+        其中 E_decay = EPSILON_DECAY_EPISODES（固定 10000，与 --total_episodes 解耦）。
 
         Returns:
             当前 epsilon 值，不低于 EPSILON_MIN
@@ -292,7 +308,7 @@ class Runner:
         t = self.pcb_episode_num
         if t <= 0:
             return eps_start
-        return eps_min + (eps_start - eps_min) * math.exp(-4.0 * t / self.total_episodes)
+        return eps_min + (eps_start - eps_min) * math.exp(-4.0 * t / Config.EPSILON_DECAY_EPISODES)
 
     def _compute_curriculum_weight(self) -> float:
         """跨 episode 线性递增出界惩罚权重。
@@ -412,25 +428,43 @@ class Runner:
         logger.info(f"Best checkpoint saved: {ckpt_path} (R={best_r:.2f}, ep={best_ep})")
 
     def _backup_previous_results(self, pcb_name: str):
-        """训练开始前备份上次的结果文件，避免覆盖丢失。
+        """训练开始前备份上次的模型文件，最多保留 5 份。
+
+        备份策略：
+        - 只备份 .pt 模型文件（含 best checkpoints + 旧训练的最终权重）
+        - 按训练开始时间戳命名，便于区分不同次训练
+        - 超过 5 份时自动删除最旧的备份
 
         Args:
             pcb_name: PCB 文件名
         """
         pcb_short = pcb_name.replace(".kicad_pcb", "")
-        files_to_backup = [
-            f"{pcb_short}_best.pt",
-            f"{pcb_short}_loss_history.json",
-            f"{pcb_short}_loss_curve.png",
-        ]
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = os.path.join(self.save_dir, "backup", timestamp)
-        for fname in files_to_backup:
-            src = os.path.join(self.save_dir, fname)
-            if os.path.isfile(src):
-                os.makedirs(backup_dir, exist_ok=True)
-                shutil.move(src, os.path.join(backup_dir, fname))
-                logger.info(f"Backed up: {fname} → {backup_dir}/")
+        backup_dir = os.path.join(self.save_dir, "backup")
+        os.makedirs(backup_dir, exist_ok=True)
+
+        # 扫描所有 .pt 文件（含 best.pt 和历史备份）
+        pt_files = glob.glob(os.path.join(self.save_dir, f"{pcb_short}*.pt"))
+        for src in pt_files:
+            fname = os.path.basename(src)
+            # 在文件名中插入时间戳：model_best.pt → model_best_20260806_143000.pt
+            name_parts = os.path.splitext(fname)
+            backup_name = f"{name_parts[0]}_{timestamp}{name_parts[1]}"
+            dst = os.path.join(backup_dir, backup_name)
+            shutil.move(src, dst)
+            logger.info(f"Backed up: {fname} → backup/{backup_name}")
+
+        # ---- 清理旧备份：超过 5 份删最旧的 ----
+        backup_pattern = os.path.join(backup_dir, f"{pcb_short}*.pt")
+        all_backups = sorted(glob.glob(backup_pattern))
+        while len(all_backups) > 5:
+            oldest = all_backups[0]
+            try:
+                os.remove(oldest)
+                logger.info(f"Removed old backup: backup/{os.path.basename(oldest)}")
+            except OSError:
+                pass
+            all_backups.pop(0)
 
     def _plot_loss_curve(self, pcb_name: str):
         """生成 Loss-Episode 曲线图并保存到 save_dir。

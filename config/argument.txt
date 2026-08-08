@@ -7,16 +7,17 @@ W_NET_AGGREGATION     = 10.0      # 网络聚集奖励（同一网络元件越�
 W_CONGESTION          = 5.0       # 拥塞均衡奖励（引导元件分布均匀）
 W_DECOUPLING           = 10.0     # 去耦电容配对奖励（去耦电容靠近对应 IC）
 W_LARGE_COMP           = 5.0      # 大型元件优先奖励（大元件早放有更多空位可选）
-W_COMPLETION           = 200.0    # 完成奖励（每成功放置一颗元件的基础分）
+W_COMPLETION           = 100.0    # 完成奖励（每成功放置一颗元件的基础分）
 
 # ========== Reward Shaping：品质项时序 ==========
-QUALITY_START_EP      = 10000     # 品质项开始介入的 episode（暂时关闭，先验证纯约束收敛）
+QUALITY_START_EP      = 3000      # 品质项开始介入的 episode（约束学稳后引入品质引导）
 QUALITY_RAMP_EP       = 2000      # 品质项线性升温 episode 数（到 START+RAMP 时品质权重=1.0）
 
 # ========== 训练参数 ==========
 GAMMA               = 0.99       # 折扣因子（0.99^5≈0.95，5步子任务间有效；跨元件衰减大但局部优先有益）
 EPSILON_START       = 1.0        # ε-greedy 初始探索率（完全随机）
-EPSILON_MIN         = 0.05       # ε-greedy 最小探索率（指数衰减下界）
+EPSILON_MIN         = 0.15       # ε-greedy 最小探索率（指数衰减下界）
+EPSILON_DECAY_EPISODES = 10000  # ε 衰减参考 ep 数（与 TOTAL_EPISODES 解耦，即使只用 2000ep 衰减也不加快）
 MAX_STEPS           = 2000       # 单 episode 最大环境步数（233 元件×5 子步≈1165，留余量）
 EARLY_STOP_THRESHOLD  = -1000.0  # 累计 reward 低于此值提前终止 episode（惩罚缩小 10x 同步）
 CURRICULUM_START_EP = 0          # curriculum 起始 episode（出界惩罚从轻到重）
@@ -28,6 +29,7 @@ BATCH_SIZE          = 64         # 每次从 replay buffer 采样的批量大小
 REPLAY_BUFFER_SIZE  = 100000     # 经验回放池容量（存满后旧经验被覆盖）
 LEARNING_RATE       = 0.0001     # Adam 优化器学习率
 TARGET_UPDATE_FREQ  = 100        # target 网络同步频率（每 N 次学习更新一次目标网络）
+WARMUP_EPISODES     = 500        # 预热期：前 N 个 episode 只收集不学习，避免早期噪声样本污染梯度
 
 # ========== 几何阈值（单位：mm） ==========
 BOARD_MARGIN        = 1.0        # 板框内缩边距（元件必须在此范围内）

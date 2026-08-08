@@ -69,7 +69,7 @@ def main():
     while not done:
         # 5 步自回归
         for step_id in range(5):
-            mask = env._build_mask_for_step(step_id) if step_id == 0 else None
+            mask = env._build_mask_for_step(step_id)
             obs = env._get_obs_with_pending(step_id)
             action = agent.select_action(obs, mask, step_id, epsilon=0.0)
             env._update_pending(action, step_id)
@@ -120,32 +120,13 @@ def main():
 
 
 def _clamp_action(action, env):
-    """Clamp 兜底：将动作坐标限制在 valid_area 内。"""
-    comp_idx, gx1, gy1, gx2, gy2, rot, lay = action
-    comp = env.movable_list[comp_idx]
+    """Clamp 兜底：将动作坐标限制在 valid_area 内（复用统一实现）。
 
-    # 限制网格坐标
-    gx1 = max(0, min(gx1, env.grid_width - 1))
-    gy1 = max(0, min(gy1, env.grid_height - 1))
-
-    expected_w = max(1, int(comp.footprint_w / _Config.CELL_SIZE))
-    expected_h = max(1, int(comp.footprint_h / _Config.CELL_SIZE))
-    gx2 = min(gx1 + expected_w, env.grid_width)
-    gy2 = min(gy1 + expected_h, env.grid_height)
-
-    # 限制 mm 坐标
-    x1_mm = env.valid_area[0] + gx1 * _Config.CELL_SIZE
-    y1_mm = env.valid_area[1] + gy1 * _Config.CELL_SIZE
-    x2_mm = min(x1_mm + comp.footprint_w, env.valid_area[2])
-    y2_mm = min(y1_mm + comp.footprint_h, env.valid_area[3])
-
-    # 重新计算网格坐标
-    gx1_clamped = int((x1_mm - env.valid_area[0]) / _Config.CELL_SIZE)
-    gy1_clamped = int((y1_mm - env.valid_area[1]) / _Config.CELL_SIZE)
-    gx2_clamped = int((x2_mm - env.valid_area[0]) / _Config.CELL_SIZE)
-    gy2_clamped = int((y2_mm - env.valid_area[1]) / _Config.CELL_SIZE)
-
-    return (comp_idx, gx1_clamped, gy1_clamped, gx2_clamped, gy2_clamped, rot, lay)
+    统一使用 PCBUtils.clamp_to_board 保持 AABB 宽高不变，仅平移，
+    避免直接 min/max 截断导致元件尺寸变化触发 AABB 校验失败。
+    """
+    from scripts.run_inference import _clamp_action_to_board
+    return _clamp_action_to_board(env, *action)
 
 
 if __name__ == "__main__":

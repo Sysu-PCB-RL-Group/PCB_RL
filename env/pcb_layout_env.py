@@ -43,6 +43,7 @@ class Config:
     EARLY_STOP_THRESHOLD: float = -1000.0
     EPSILON_START: float = 1.0
     EPSILON_MIN: float = 0.05
+    EPSILON_DECAY_EPISODES: int = 10000  # ε 衰减参考 ep 数（与 TOTAL_EPISODES 解耦）
     CURRICULUM_START_EP: int = 0
     CURRICULUM_END_EP: int = 500
 
@@ -51,6 +52,7 @@ class Config:
     REPLAY_BUFFER_SIZE: int = 10000
     LEARNING_RATE: float = 0.0001
     TARGET_UPDATE_FREQ: int = 100
+    WARMUP_EPISODES: int = 500
 
     # 几何阈值
     BOARD_MARGIN: float = 1.0
@@ -64,6 +66,11 @@ class Config:
     MAX_MOVABLE: int = 18        # 最大可移动元件数 (6 × 20)
     GRID_W: int = 21             # 最大网格宽度 (7 × 20)
     GRID_H: int = 21             # 最大网格高度 (7 × 20)
+
+    # 观测归一化开关（默认关闭以兼容已有 checkpoint）
+    # 开启后坐标除以 board_diagonal，rotation 除以 4.0，
+    # 对齐 global_features 中的归一化尺度。需重新训练。
+    NORMALIZE_OBS: bool = False
 
     @classmethod
     def load_from_file(cls, path: str):
@@ -456,11 +463,21 @@ class PCBLayoutEnv(gym.Env):
             if not comp.is_placed:
                 continue
             obs[slot_idx, 0] = 1.0                        # placed_flag
-            obs[slot_idx, 1] = comp.bbox[0]               # x1
-            obs[slot_idx, 2] = comp.bbox[1]               # y1
-            obs[slot_idx, 3] = comp.bbox[2]               # x2
-            obs[slot_idx, 4] = comp.bbox[3]               # y2
-            obs[slot_idx, 5] = float(comp.rotation)       # rotation
+            if Config.NORMALIZE_OBS:
+                # 归一化坐标：提升跨尺度泛化能力，对齐其他归一化特征
+                diag = max(self.board_diagonal, 0.01)
+                obs[slot_idx, 1] = comp.bbox[0] / diag        # x1
+                obs[slot_idx, 2] = comp.bbox[1] / diag        # y1
+                obs[slot_idx, 3] = comp.bbox[2] / diag        # x2
+                obs[slot_idx, 4] = comp.bbox[3] / diag        # y2
+                obs[slot_idx, 5] = float(comp.rotation) / 4.0 # rotation
+            else:
+                # 旧行为：原始 mm 值（与已有 checkpoint 兼容）
+                obs[slot_idx, 1] = comp.bbox[0]               # x1
+                obs[slot_idx, 2] = comp.bbox[1]               # y1
+                obs[slot_idx, 3] = comp.bbox[2]               # x2
+                obs[slot_idx, 4] = comp.bbox[3]               # y2
+                obs[slot_idx, 5] = float(comp.rotation)       # rotation
             obs[slot_idx, 6] = float(comp.layer)          # layer
             obs[slot_idx, 7] = float(len(comp.nets))      # net_count
 
@@ -549,13 +566,18 @@ class PCBLayoutEnv(gym.Env):
         """为指定子步骤构建固定维度 1D bool 动作掩码。
 
         Step 0 (comp): index >= N_movable 或已放置/固定 → mask=False
-        Step 1~4: 无掩码，Agent 自行从 reward 学会边界
+        Step 1 (x1):   grid_x >= grid_width → mask=False（越界坐标硬屏蔽）
+        Step 2 (y1):   grid_y >= grid_height → mask=False（越界坐标硬屏蔽）
+        Step 3~4:      无掩码，所有候选全合法
 
         Args:
             step_id: 子步骤编号 0-4
 
         Returns:
-            step 0: 固定长度 (MAX_MOVABLE,) bool 向量；step 1~4: None
+            step 0: 固定长度 (MAX_MOVABLE,) bool 向量
+            step 1: (GRID_W,) bool 向量
+            step 2: (GRID_H,) bool 向量
+            step 3~4: None
         """
         if step_id == 0:
             mask = np.zeros(Config.MAX_MOVABLE, dtype=bool)
@@ -564,6 +586,12 @@ class PCBLayoutEnv(gym.Env):
                 if not comp.is_placed and not comp.is_fixed:
                     mask[i] = True
             return mask
+
+        if step_id == 1:
+            return np.arange(Config.GRID_W) < self.grid_width
+
+        if step_id == 2:
+            return np.arange(Config.GRID_H) < self.grid_height
 
         return None
 

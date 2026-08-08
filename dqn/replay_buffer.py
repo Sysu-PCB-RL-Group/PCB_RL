@@ -27,10 +27,10 @@ class ReplayBuffer:
 
     def add(
         self,
-        obs: np.ndarray,
+        obs: dict,
         action: int,
         reward: float,
-        next_obs: np.ndarray,
+        next_obs: dict,
         mask: Optional[np.ndarray],
         done: bool,
         step_id: int,
@@ -39,10 +39,10 @@ class ReplayBuffer:
         """添加一条 transition。
 
         Args:
-            obs: 当前观测 (obs_dim,)
+            obs: 当前 Dict 观测 {"component_slots": (M,8), "global_features": (8,)}
             action: 选中的动作索引
             reward: 延迟 reward（仅 step_id=4 时非零）
-            next_obs: 下一步观测 (obs_dim,)
+            next_obs: 下一步 Dict 观测，结构同 obs
             mask: 当前子步骤的动作掩码 (K,) 或 None（无掩码）
             done: 是否终止（仅 step_id=4 时可能为 True）
             step_id: 当前子步骤编号 0-4

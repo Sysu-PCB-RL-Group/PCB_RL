@@ -155,18 +155,24 @@ def test_mask_step0_all_available():
     assert mask.sum() == env.N_movable
 
 
-def test_mask_step1_none():
-    """step 1 不再需要掩码，返回 None。"""
+def test_mask_step1_grid_bounds():
+    """step 1 返回 (GRID_W,) 越界 mask，grid_x < grid_width 才合法。"""
     env = create_patched_env()
     mask = env._build_mask_for_step(1)
-    assert mask is None
+    assert mask is not None
+    assert mask.shape == (Config.GRID_W,), f"Expected ({Config.GRID_W},), got {mask.shape}"
+    assert mask.sum() == env.grid_width  # 只有板内坐标合法
+    assert not mask[env.grid_width:].any()  # 越界坐标全 False
 
 
-def test_mask_step2_none():
-    """step 2 不再需要掩码，返回 None。"""
+def test_mask_step2_grid_bounds():
+    """step 2 返回 (GRID_H,) 越界 mask，grid_y < grid_height 才合法。"""
     env = create_patched_env()
     mask = env._build_mask_for_step(2)
-    assert mask is None
+    assert mask is not None
+    assert mask.shape == (Config.GRID_H,), f"Expected ({Config.GRID_H},), got {mask.shape}"
+    assert mask.sum() == env.grid_height  # 只有板内坐标合法
+    assert not mask[env.grid_height:].any()  # 越界坐标全 False
 
 
 # ==================== reward ====================
