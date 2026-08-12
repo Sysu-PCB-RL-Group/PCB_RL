@@ -11,12 +11,11 @@ PCB_RL/
 ├── requirements.txt
 ├── config/
 │   └── argument.txt             # 超参数配置
-├── kicad-native-batch/          # 立创 EDA KiCad 项目（当前仅使用开关小板）
-│   └── ran-pang-airlink-.../    # 开关小板（唯一训练/推理数据）
-│       ├── *.kicad_pcb          # PCB 布局文件（RL 读取的数据源）
-│       ├── *.kicad_sch          # 原理图
-│       └── *.kicad_pro          # KiCad 项目文件
 ├── data/
+│   ├── kicad-native-batch/       # 立创 EDA KiCad 项目（5个极简训练板）
+│   │   ├── *.kicad_pcb          # PCB 布局文件（RL 读取的数据源）
+│   │   ├── *.kicad_sch          # 原理图
+│   │   └── *.kicad_pro          # KiCad 项目文件
 │   ├── 模拟/                    # 合成 PCB JSON 数据（旧版，用于无 KiCad 调试）
 │   └── README.txt
 ├── docs/                        # 文档 & SPEC

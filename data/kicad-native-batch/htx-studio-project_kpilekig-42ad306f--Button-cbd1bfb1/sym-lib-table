@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "htx-studio-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/htx-studio-easyedapro.kicad_sym") (options "") (descr ""))
+)

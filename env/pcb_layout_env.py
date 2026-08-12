@@ -765,10 +765,10 @@ class PCBLayoutEnv(gym.Env):
     # ==================== 对外工具 ====================
 
     def get_all_files(self) -> List[str]:
-        """扫描 data/ 目录下所有 PCB 文件。
+        """递归扫描 data/ 目录下所有 PCB 文件。
 
         Returns:
-            排序后的 PCB 文件名列表（不含路径前缀）
+            排序后的 PCB 文件相对路径列表（相对于 data/ 根目录）
         """
         import os
         data_dir = os.path.abspath(
@@ -776,25 +776,29 @@ class PCBLayoutEnv(gym.Env):
         )
         if not os.path.isdir(data_dir):
             return []
-        return sorted([
-            f for f in os.listdir(data_dir)
-            if f.lower().endswith((".kicad_pcb", ".pcb"))
-        ])
+        files = []
+        for root, _dirs, fnames in os.walk(data_dir):
+            for f in fnames:
+                if f.lower().endswith((".kicad_pcb", ".pcb")):
+                    files.append(os.path.relpath(os.path.join(root, f), data_dir))
+        return sorted(files)
 
     @staticmethod
     def get_all_pcb_files(data_dir: str) -> List[str]:
-        """扫描指定目录下所有 PCB 文件。
+        """递归扫描指定目录下所有 PCB 文件。
 
         Args:
             data_dir: 要扫描的目录路径
 
         Returns:
-            排序后的 PCB 文件名列表（不含路径前缀）
+            排序后的 PCB 文件相对路径列表（相对于 data_dir）
         """
         import os
         if not os.path.isdir(data_dir):
             return []
-        return sorted([
-            f for f in os.listdir(data_dir)
-            if f.lower().endswith((".kicad_pcb", ".pcb"))
-        ])
+        files = []
+        for root, _dirs, fnames in os.walk(data_dir):
+            for f in fnames:
+                if f.lower().endswith((".kicad_pcb", ".pcb")):
+                    files.append(os.path.relpath(os.path.join(root, f), data_dir))
+        return sorted(files)

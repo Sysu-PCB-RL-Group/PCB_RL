@@ -1,4 +1,0 @@
-(sym_lib_table
-	(version 7)
-	(lib (name "movecall-m-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/movecall-m-easyedapro.kicad_sym") (options "") (descr ""))
-)

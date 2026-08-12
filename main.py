@@ -1,8 +1,6 @@
 """PCB_RL CLI 入口。
 
-支持两种模式：
-  - 真实 KiCad 模式：python main.py（默认使用开关小板）
-  - Mock 模式（无需 KiCad）：python main.py --mock --data_dir data/模拟
+使用真实 KiCad PCB 数据训练：python main.py（默认跨 5 个板子随机训练）
 
 基于 SPEC v2.1。
 """
@@ -22,10 +20,9 @@ def get_config():
     parser.add_argument(
         "--data_dir", type=str,
         default=os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "kicad-native-batch",
-            "ran-pang-airlink-86231b34--开关小板-883285b3",
+            os.path.dirname(__file__), "data", "kicad-native-batch",
         )),
-        help="PCB 文件目录（.kicad_pcb 或 .json）",
+        help="PCB 批次根目录（内含多个板子子目录，递归扫描 .kicad_pcb）",
     )
     parser.add_argument(
         "--config_path", type=str,
@@ -33,11 +30,6 @@ def get_config():
         help="超参数配置文件路径",
     )
 
-    # === Mock 模式 ===
-    parser.add_argument(
-        "--mock", action="store_true",
-        help="Mock 模式（无需 KiCad，使用 data/模拟/*.json 数据）",
-    )
     # === Debug 模式 ===
     parser.add_argument(
         "--debug", action="store_true",
@@ -65,17 +57,11 @@ def get_config():
     # 标记 --total_episodes 是否为用户显式指定
     args.explicit_total_episodes = "--total_episodes" in sys.argv
 
-    # --mock 模式下自动切换默认 data_dir
-    if args.mock and args.data_dir == os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "kicad-native-batch")):
-        args.data_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "data", "模拟"))
-
     return args
 
 
 def run():
-    """主入口：解析参数 → Mock 注入（如需）→ 创建 Runner → 启动训练。"""
+    """主入口：解析参数 → 创建 Runner → 启动训练。"""
     args = get_config()
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -85,19 +71,6 @@ def run():
         logging.getLogger("dqn").setLevel(logging.DEBUG)
         from env.pcb_layout_env import Config
         Config.LOG_INTERVAL = 1  # 每 episode 都打日志
-
-    # Mock 模式：必须在 import Runner 之前注入，阻止 utils.kicad_utils 加载 DLL
-    if args.mock:
-        from unittest import mock
-        _m = mock.MagicMock()
-        sys.modules["utils.kicad_utils"] = _m
-
-        from env.mock_pcb import MockKiCadUtils, MockComponent, MockNet
-        import utils as _utils
-        _utils.kicad_utils = sys.modules["utils.kicad_utils"]
-        _utils.kicad_utils.KiCadUtils = MockKiCadUtils
-        _utils.kicad_utils.Component = MockComponent
-        _utils.kicad_utils.Net = MockNet
 
     from run import Runner
     runner = Runner(args)

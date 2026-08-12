@@ -73,8 +73,8 @@ def kicad_pcb_path():
 
     优先使用最小的板子（减少测试耗时），找不到则 skip。
     """
-    # 查找 kicad-native-batch 下的所有 .kicad_pcb
-    batch_dir = os.path.join(os.path.dirname(__file__), "..", "..", "kicad-native-batch")
+    # 查找 data/kicad-native-batch 下的所有 .kicad_pcb
+    batch_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "kicad-native-batch")
     candidates = []
     for root, dirs, files in os.walk(batch_dir):
         for f in files:
@@ -82,7 +82,7 @@ def kicad_pcb_path():
                 candidates.append(os.path.join(root, f))
 
     if not candidates:
-        pytest.skip("No .kicad_pcb files found in kicad-native-batch/")
+        pytest.skip("No .kicad_pcb files found in data/kicad-native-batch/")
 
     # 优先选择最小的板子
     candidates.sort(key=lambda p: os.path.getsize(p))
