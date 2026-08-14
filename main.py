@@ -39,6 +39,10 @@ def get_config():
     # === 训练参数 ===
     parser.add_argument("--total_episodes", type=int, default=10000, help="总训练 episode 数")
     parser.add_argument("--max_episode_step", type=int, default=100, help="每个 episode 最大步数")
+    parser.add_argument(
+        "--board", type=str, default=None,
+        help="指定训练的板子名（如 '开关小板'），不指定则训练所有板子",
+    )
 
     # === 环境 & 设备 ===
     parser.add_argument(

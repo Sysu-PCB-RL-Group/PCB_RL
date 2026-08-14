@@ -325,10 +325,9 @@ class KiCadUtils:
 
             connections = []
             target_net_code = net.GetNetCode()
-            for idx, footprint in enumerate(self.board.Footprints()):
-                # 使用 _cache_footprints 修正后的 ref，而非原始的 fp.GetReference()
-                ref = self._fp_refs[idx] if idx < len(self._fp_refs) else footprint.GetReference()
-                for pad in footprint.Pads():
+            # 直接遍历已缓存的 footprints dict，避免依赖两次 Footprints() 迭代顺序一致
+            for ref, fp in self.footprints.items():
+                for pad in fp.Pads():
                     if pad.GetNetCode() == target_net_code:
                         connections.append((ref, pad.GetNumber()))
                         net_map.setdefault(net_name, [])
@@ -482,18 +481,20 @@ class KiCadUtils:
         """
         try:
             board = self.board
+            # 模板 footprint 独立存储，避免污染 self.footprints
+            # （若后续调用 restore_initial_state()，需基于原始 board 的 footprints）
+            template_fps = None
             if template_path is not None:
                 board = pcbnew.LoadBoard(template_path)
-                # 重新缓存 footprint，用于查找
-                self.footprints.clear()
+                template_fps = {}
                 for fp in board.Footprints():
-                    self.footprints[fp.GetReference()] = fp
+                    template_fps[fp.GetReference()] = fp
 
             for ref, comp in components.items():
                 # ① 只写 RL 放过的元件：固定 + 未放置都保持源坐标原封不动
                 if comp.is_fixed or not comp.is_placed:
                     continue
-                fp = self.footprints.get(ref)
+                fp = (template_fps if template_fps is not None else self.footprints).get(ref)
                 if fp is None:
                     continue
 

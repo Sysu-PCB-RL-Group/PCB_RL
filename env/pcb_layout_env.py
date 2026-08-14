@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 class Config:
     """默认配置常量"""
     # Reward 权重
-    W_OVERLAP_HARD: float = 100.0
-    W_OVERLAP_SOFT: float = 50.0
-    W_OUT_OF_BOUNDS_INITIAL: float = 10.0
-    W_OUT_OF_BOUNDS_FINAL: float = 100.0
+    W_OVERLAP_HARD: float = 20.0
+    W_OVERLAP_SOFT: float = 10.0
+    W_OUT_OF_BOUNDS_INITIAL: float = 2.0
+    W_OUT_OF_BOUNDS_FINAL: float = 20.0
     W_NET_AGGREGATION: float = 10.0
     W_CONGESTION: float = 5.0
     W_DECOUPLING: float = 10.0
@@ -40,9 +40,9 @@ class Config:
     TOTAL_EPISODES: int = 10000
     SAVE_INTERVAL: int = 500
     LOG_INTERVAL: int = 100
-    EARLY_STOP_THRESHOLD: float = -1000.0
-    EPSILON_START: float = 1.0
-    EPSILON_MIN: float = 0.05
+    EARLY_STOP_THRESHOLD: float = -150.0
+    EPSILON_START: float = 0.6
+    EPSILON_MIN: float = 0.1
     EPSILON_DECAY_EPISODES: int = 10000  # ε 衰减参考 ep 数（与 TOTAL_EPISODES 解耦）
     CURRICULUM_START_EP: int = 0
     CURRICULUM_END_EP: int = 500
@@ -51,7 +51,7 @@ class Config:
     BATCH_SIZE: int = 64
     REPLAY_BUFFER_SIZE: int = 10000
     LEARNING_RATE: float = 0.0001
-    TARGET_UPDATE_FREQ: int = 100
+    TARGET_UPDATE_FREQ: int = 20   # 每 N 个 episode 同步一次 target 网络
     WARMUP_EPISODES: int = 500
 
     # 几何阈值
@@ -71,6 +71,18 @@ class Config:
     # 开启后坐标除以 board_diagonal，rotation 除以 4.0，
     # 对齐 global_features 中的归一化尺度。需重新训练。
     NORMALIZE_OBS: bool = False
+
+    # ---- 专家轨迹注入 ----
+    EXPERT_TRAJECTORIES_PER_BOARD: int = 20
+    EXPERT_EPSILON_DECOMPOSE: float = 0.2
+    EXPERT_POS_NOISE_PROB: float = 0.2
+    EXPERT_ROT_NOISE_PROB: float = 0.1
+    EXPERT_BC_EPOCHS: int = 50
+    EXPERT_BUFFER_RATIO: float = 0.2
+    EXPERT_BUFFER_MULTIPLIER: int = 5
+    PER_ALPHA: float = 0.6
+    PER_BETA_START: float = 0.4
+    EXPERT_TRANSITIONS_DIR: str = "data/expert_transitions"
 
     @classmethod
     def load_from_file(cls, path: str):
@@ -668,11 +680,18 @@ class PCBLayoutEnv(gym.Env):
         for net_id in component.nets:
             net = self.nets[net_id]
             comp_bboxes = []
+            # net.connections 不去重（一个 footprint 多 pad 连同一 net 有多个条目），
+            # 需按 ref 去重，避免同一 footprint 的 bbox 被重复计入导致聚合度失真
+            seen_refs = set()
             for conn_ref, _ in net.connections:
-                if conn_ref in self.kicad.components:
+                if conn_ref in self.kicad.components and conn_ref not in seen_refs:
+                    seen_refs.add(conn_ref)
                     c = self.kicad.components[conn_ref]
                     if c.is_placed:
                         comp_bboxes.append(c.bbox)
+            # 当前元件刚放置，bbox 已更新但 is_placed 尚未置 True（step() 在 reward 计算后更新），
+            # 需显式计入，否则每个 net 少算一个元件，2 元件 net 永远拿不到聚合奖励
+            comp_bboxes.append(component.bbox)
             if len(comp_bboxes) >= 2:
                 agg = PCBUtils.net_aggregation(comp_bboxes)
                 agg_score = max(0.0, 1.0 - agg / max(self.board_diagonal, 0.01))
@@ -680,9 +699,10 @@ class PCBLayoutEnv(gym.Env):
         reward += agg_reward * quality_scale
         breakdown["net_aggregation"] = agg_reward * quality_scale
 
-        # 拥塞均衡度
+        # 拥塞均衡度：仅正常放置（无违规）计入当前元件，
+        # 违规元件位置无效，不应参与品质奖励计算
         placed_comps = [self.kicad.components[rid] for rid in self.placed_list]
-        if has_violations:
+        if not has_violations:
             placed_comps.append(component)
         cong_std = PCBUtils.congestion_std(
             placed_comps, self.nets, self.valid_area,
@@ -712,11 +732,14 @@ class PCBLayoutEnv(gym.Env):
         breakdown["decoupling"] = decap_reward * quality_scale
         breakdown["decoupling_violations"] = decap_violations
 
-        # 大元件排名
+        # 大元件排名：面积因子 × 早放因子，鼓励"大元件越早放越好"
         large_comp_reward = 0.0
         if component.id in self.area_ranks:
             rank = self.area_ranks[component.id]
-            large_comp_reward = max(0.0, 1.0 - rank / self.N_movable) * Config.W_LARGE_COMP
+            size_factor = max(0.0, 1.0 - rank / self.N_movable)
+            # placement_step = len(placed_list)：当前元件是第几个被放置的（0-based）
+            order_factor = max(0.0, 1.0 - len(self.placed_list) / self.N_movable)
+            large_comp_reward = size_factor * order_factor * Config.W_LARGE_COMP
         reward += large_comp_reward * quality_scale
         breakdown["large_comp"] = large_comp_reward * quality_scale
 

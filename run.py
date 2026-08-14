@@ -1,7 +1,9 @@
-"""训练循环 Runner：自回归 5 步 DQN + epsilon-greedy + curriculum learning。
-跨板子随机选板训练，Agent/Buffer 全局共享。
+"""训练循环 Runner：两阶段 DQN 训练（BC 预训练 + RL + 专家注入）。
 
-基于 SPEC v2.2 §4.5、§10。
+Phase 1: BC 预训练 — 仅用专家 transition 做监督学习（50 epoch）
+Phase 2: RL 训练 — 正常 DQN + 20% 专家常驻 buffer + PER 优先经验回放
+
+基于 SPEC v2.2 §4.5、§10，扩展专家轨迹注入方案。
 """
 
 import glob
@@ -12,13 +14,15 @@ import os
 import random
 import shutil
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import numpy as np
 import torch
 
 from env.pcb_layout_env import PCBLayoutEnv, Config
-from dqn import DQNAgent, ReplayBuffer
+from env.expert_trajectory import generate_and_save_expert_transitions
+from dqn import DQNAgent
+from dqn.replay_buffer import ReplayBuffer, ExpertReplayBuffer
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -85,6 +89,7 @@ class Runner:
         self.per_board_rewards: dict[str, list] = {}      # {pcb_name: [r1, r2, ...]}
         self.per_board_placed: dict[str, list] = {}       # {pcb_name: [p1, p2, ...]}
         self.per_board_loss_history: dict[str, list] = {} # {pcb_name: [(ep, loss), ...]}
+        self.per_board_reward_history: dict[str, list] = {} # {pcb_name: [(ep, reward), ...]}
 
         # ---- 全局最佳（用于保存 best_model.pt） ----
         self.global_best_reward: float = float("-inf")
@@ -94,8 +99,16 @@ class Runner:
         # 各个 PCB 的训练统计（用于最终汇总）
         self._pcb_history: list[dict] = []
 
+        # ---- 专家轨迹注入相关 ----
+        self.expert_transitions_dir: str = ""
+        self.expert_transitions_count: int = 0  # 专家 transition 总数
+        self.use_expert: bool = getattr(args, "use_expert", True)  # 是否启用专家注入
+
     def run(self):
-        """主训练循环：跨板子随机选板，Agent/Buffer 共享。"""
+        """两阶段训练循环：Phase 1 BC 预训练 + Phase 2 RL + 专家注入。"""
+        # ---- 备份旧产物（必须在打开新日志文件之前，否则 Windows 锁文件导致 move 失败） ----
+        self._backup_previous_results()
+
         # 文件日志
         log_path = os.path.join(self.save_dir, "training_log.txt")
         file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
@@ -152,7 +165,6 @@ class Runner:
             if os.path.isdir(board_dir):
                 shutil.rmtree(board_dir)
                 logger.info(f"Cleaned old board dir: {board_dir}")
-        # 清理旧的汇总文件
         for fname in ("training_summary.json",):
             fpath = os.path.join(self.save_dir, fname)
             if os.path.isfile(fpath):
@@ -167,28 +179,49 @@ class Runner:
             self.per_board_rewards[pcb_name] = []
             self.per_board_placed[pcb_name] = []
             self.per_board_loss_history[pcb_name] = []
-
-        # ---- 4. 创建共享 Agent / Buffer ----
-        agent, buffer = self._init_agent_and_buffer()
-
-        # ---- 5. 备份旧 best_model.pt ----
-        self._backup_previous_results()
+            self.per_board_reward_history[pcb_name] = []
 
         pcb_names = [n for n, _ in self.pcb_pool]
 
-        # ---- 6. 预热期：总共 500 轮，随机选板，纯探索不学习 ----
+        # ---- 5. 生成/加载专家 transition ----
+        all_expert_transitions = self._generate_or_load_expert_transitions()
+        self.expert_transitions_count = len(all_expert_transitions)
+        logger.info(f"Total expert transitions: {self.expert_transitions_count}")
+
+        # ---- 6. Phase 1: BC 预训练 ----
+        if self.use_expert and self.expert_transitions_count > 0:
+            self._phase1_bc_pretrain(all_expert_transitions, pcb_names)
+        else:
+            logger.warning("专家注入已禁用或无专家 transition，跳过 BC 预训练")
+
+        # ---- 7. Phase 2: RL 训练 + 专家注入 ----
+        if self.use_expert and self.expert_transitions_count > 0:
+            agent, buffer = self._phase2_setup(all_expert_transitions, pcb_names)
+        else:
+            # 回退到标准 ReplayBuffer（不使用专家注入）
+            agent, buffer = self._init_agent_and_buffer()
+            bc_ckpt_path = os.path.join(self.save_dir, "bc_pretrained.pt")
+            if os.path.isfile(bc_ckpt_path):
+                agent.load(bc_ckpt_path)
+                logger.info(f"Phase 2: loaded BC pretrained weights from {bc_ckpt_path}")
+
+        # ---- 8. Phase 2 预热：混合探索填充 buffer（不学习） ----
         WARMUP_TOTAL = 500
-        logger.info(
-            f"Warming up: {WARMUP_TOTAL} ep (random board, ε=1.0, no learning)"
-        )
+        logger.info(f"Phase 2 warmup: {WARMUP_TOTAL} ep (epsilon=0.5, no learning)")
+        # epsilon=0.5：50% BC 模型引导 + 50% 随机探索，预热时不清空 per_board_episode
         for _ in range(WARMUP_TOTAL):
             pcb_name = random.choice(pcb_names)
             env = self.envs[pcb_name]
-            self._run_episode(env, agent, buffer, pcb_name, ep_num=0, learn=False)
+            ep_reward, ep_steps, ep_placed, _ = self._run_episode(
+                env, agent, buffer, pcb_name,
+                ep_num=0, learn=False, epsilon=0.5,
+            )
+            self.per_board_rewards[pcb_name].append(ep_reward)
+            self.per_board_placed[pcb_name].append(ep_placed)
         logger.info(f"Warmup complete ({len(buffer)} transitions in buffer)")
 
-        # ---- 7. 正式训练：每 episode 随机选板 ----
-        logger.info(f"Training: {self.total_episodes} episodes (random board selection)")
+        # ---- 9. 正式训练：每 episode 随机选板 ----
+        logger.info(f"Phase 2 RL training: {self.total_episodes} episodes (random board selection)")
         logger.info(f"Global best will be saved to: {os.path.join(self.save_dir, 'best_model.pt')}")
 
         for ep in range(self.total_episodes):
@@ -208,6 +241,7 @@ class Runner:
             self.per_board_rewards[pcb_name].append(ep_reward)
             self.per_board_placed[pcb_name].append(ep_placed)
             self.per_board_loss_history[pcb_name].append((board_ep, avg_loss))
+            self.per_board_reward_history[pcb_name].append((board_ep, ep_reward))
 
             # 检查 per-board 最佳
             if ep_reward > self.per_board_best_reward[pcb_name]:
@@ -227,29 +261,45 @@ class Runner:
                     f"board={pcb_name} ep={self.global_best_episode} → {ckpt_path}"
                 )
 
+            # target 网络同步（按 episode 计数）
+            if self.episode_num % Config.TARGET_UPDATE_FREQ == 0:
+                agent.sync_target()
+
             # 日志
             self._log_episode(pcb_name, ep_reward, ep_steps, ep_placed, avg_loss)
 
-            # 定期画 per-board loss 曲线
+            # 定期画 per-board loss / reward 曲线
             if board_ep % 100 == 0:
                 self._plot_loss_curve(pcb_name)
+                self._plot_reward_curve(pcb_name)
 
-        # ---- 8. 训练结束：per-board 分析 & 全局汇总 ----
+        # ---- 10. 训练结束：per-board 分析 & 全局汇总 ----
         for pcb_name in pcb_names:
             self._plot_loss_curve(pcb_name)
+            self._plot_reward_curve(pcb_name)
             best_state = self.per_board_best_state.get(pcb_name)
             if best_state:
                 self._export_best_layout(pcb_name, best_state,
                                          self.per_board_best_reward[pcb_name],
                                          self.per_board_best_episode[pcb_name])
-
             self._write_pcb_summary(pcb_name)
 
-        # 保存最终 checkpoint
+        # 保存最终 checkpoint（最多保留 5 份 final_ep*.pt）
         if getattr(self.args, "explicit_total_episodes", False):
             ckpt_path = os.path.join(self.save_dir, f"final_ep{self.episode_num}.pt")
             agent.save(ckpt_path)
             logger.info(f"Final checkpoint saved: {ckpt_path}")
+
+            # 清理旧 final_ep*.pt，最多保留 5 份
+            all_finals = sorted(glob.glob(os.path.join(self.save_dir, "final_ep*.pt")))
+            while len(all_finals) > 5:
+                oldest = all_finals[0]
+                try:
+                    os.remove(oldest)
+                    logger.info(f"Removed old final checkpoint: {os.path.basename(oldest)}")
+                except OSError:
+                    pass
+                del all_finals[0]
 
         self._write_final_summary()
 
@@ -267,6 +317,7 @@ class Runner:
         buffer: ReplayBuffer, pcb_name: str,
         ep_num: int = 0,
         learn: bool = True,
+        epsilon: Optional[float] = None,
     ):
         """执行单个 episode：5 步自回归 + 写入 buffer（+ 可选 learn）。
 
@@ -277,11 +328,13 @@ class Runner:
             pcb_name: PCB 文件名
             ep_num: 该板子当前的 episode 计数（用于 epsilon/curriculum）
             learn: 是否执行学习（预热期 = False）
+            epsilon: 覆盖探索率，None 则按 curriculum 自动衰减
 
         Returns:
             (total_reward, step_count, placed_count, avg_loss)
         """
-        epsilon = self._compute_epsilon(pcb_name)
+        if epsilon is None:
+            epsilon = self._compute_epsilon(pcb_name)
         env.W_OUT_OF_BOUNDS_CURRENT = self._compute_curriculum_weight(pcb_name)
         env.current_episode = ep_num  # quality_scale 升温依据
 
@@ -333,11 +386,15 @@ class Runner:
             if learn:
                 if buffer.is_ready(Config.BATCH_SIZE):
                     batch = buffer.sample(Config.BATCH_SIZE)
-                    loss = agent.learn(batch)
+                    is_weights = buffer.get_last_is_weights() if isinstance(buffer, ExpertReplayBuffer) else None
+                    loss, td_errors = agent.learn(batch, is_weights=is_weights)
                     losses.append(loss)
 
-                    if agent.train_steps % Config.TARGET_UPDATE_FREQ == 0:
-                        agent.sync_target()
+                    # PER 优先级更新（ExpertReplayBuffer）
+                    if isinstance(buffer, ExpertReplayBuffer):
+                        indices = buffer.get_last_sampled_indices()
+                        if indices:
+                            buffer.update_priorities(indices, td_errors)
 
             env._reset_pending()
 
@@ -383,6 +440,175 @@ class Runner:
             + progress * (Config.W_OUT_OF_BOUNDS_FINAL - Config.W_OUT_OF_BOUNDS_INITIAL)
         )
 
+    # ==================== 专家轨迹生成/加载 ====================
+
+    def _generate_or_load_expert_transitions(self) -> List[Tuple]:
+        """生成或从磁盘加载所有板子的专家 transition。
+
+        优先从磁盘加载已缓存的专家数据；如果不存在则实时生成。
+
+        Returns:
+            全部专家 transition 的列表
+        """
+        # 读取专家注入超参数
+        trajectories_per_board = getattr(Config, "EXPERT_TRAJECTORIES_PER_BOARD", 20)
+        epsilon_decompose = getattr(Config, "EXPERT_EPSILON_DECOMPOSE", 0.5)
+        pos_noise_prob = getattr(Config, "EXPERT_POS_NOISE_PROB", 0.2)
+        rot_noise_prob = getattr(Config, "EXPERT_ROT_NOISE_PROB", 0.1)
+
+        # 输出目录（相对路径 → 基于项目根目录的绝对路径）
+        expert_dir = getattr(Config, "EXPERT_TRANSITIONS_DIR", "data/expert_transitions")
+        if not os.path.isabs(expert_dir):
+            expert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), expert_dir)
+        self.expert_transitions_dir = expert_dir
+        os.makedirs(self.expert_transitions_dir, exist_ok=True)
+
+        all_transitions = []
+
+        for pcb_name, _ in self.pcb_pool:
+            pcb_short = pcb_name.replace(".kicad_pcb", "")
+            filepath = os.path.join(self.expert_transitions_dir, f"{pcb_short}_expert.json")
+
+            if os.path.isfile(filepath):
+                # 从磁盘加载已缓存的专家数据
+                from env.expert_trajectory import ExpertTrajectoryGenerator
+                transitions = ExpertTrajectoryGenerator.load_transitions(filepath)
+                logger.info(
+                    f"[{pcb_short}] Loaded {len(transitions)} expert transitions from cache"
+                )
+            else:
+                # 实时生成
+                env = self.envs[pcb_name]
+                transitions, _ = generate_and_save_expert_transitions(
+                    env=env,
+                    pcb_name=pcb_name,
+                    output_dir=self.expert_transitions_dir,
+                    trajectories_per_board=trajectories_per_board,
+                    epsilon_decompose=epsilon_decompose,
+                    pos_noise_prob=pos_noise_prob,
+                    rot_noise_prob=rot_noise_prob,
+                )
+
+            all_transitions.extend(transitions)
+
+        return all_transitions
+
+    # ==================== Phase 1: BC 预训练 ====================
+
+    def _phase1_bc_pretrain(self, all_expert_transitions: List[Tuple], pcb_names: List[str]):
+        """Phase 1: BC 预训练 — 仅用专家 transition 做监督学习。
+
+        Args:
+            all_expert_transitions: 全部专家 transition 列表
+            pcb_names: PCB 名称列表
+        """
+        bc_epochs = getattr(Config, "EXPERT_BC_EPOCHS", 50)
+        logger.info("=" * 60)
+        logger.info(f"Phase 1: BC Pretraining — {bc_epochs} epochs on expert transitions")
+        logger.info(f"Expert transitions: {len(all_expert_transitions)}")
+        logger.info("=" * 60)
+
+        # 创建 Agent（无 buffer，纯监督学习）
+        agent = DQNAgent(
+            n_movable=Config.MAX_MOVABLE,
+            grid_w=Config.GRID_W,
+            grid_h=Config.GRID_H,
+            device=self.device,
+            lr=Config.LEARNING_RATE,
+            gamma=Config.GAMMA,
+        )
+
+        # BC 预训练
+        epoch_losses = agent.learn_bc(
+            expert_transitions=all_expert_transitions,
+            batch_size=Config.BATCH_SIZE,
+            epochs=bc_epochs,
+            verbose=True,
+        )
+
+        # 保存 BC 预训练后的 checkpoint
+        bc_ckpt_path = os.path.join(self.save_dir, "bc_pretrained.pt")
+        agent.save(bc_ckpt_path)
+        logger.info(f"BC pretrained checkpoint saved: {bc_ckpt_path}")
+
+        # 保存 BC loss 曲线数据
+        bc_loss_path = os.path.join(self.save_dir, "bc_loss_history.json")
+        with open(bc_loss_path, "w", encoding="utf-8") as f:
+            json.dump(epoch_losses, f, ensure_ascii=False)
+        logger.info(f"BC loss history saved: {bc_loss_path}")
+
+        # 设置全局最佳初始值（避免 Phase 2 首次最佳覆盖 BC checkpoint）
+        self.global_best_reward = float("-inf")
+
+    # ==================== Phase 2: RL + 专家注入 设置 ====================
+
+    def _phase2_setup(
+        self,
+        all_expert_transitions: List[Tuple],
+        pcb_names: List[str],
+    ) -> Tuple[DQNAgent, ExpertReplayBuffer]:
+        """Phase 2: 创建 Agent 和 ExpertReplayBuffer，加载 BC 权重。
+
+        Buffer 容量 = EXPERT_BUFFER_MULTIPLIER × 专家数
+        其中 20% 为专家经验常驻区。
+
+        Args:
+            all_expert_transitions: 全部专家 transition 列表
+            pcb_names: PCB 名称列表
+
+        Returns:
+            (DQNAgent, ExpertReplayBuffer) 元组
+        """
+        n_expert = len(all_expert_transitions)
+        buffer_multiplier = getattr(Config, "EXPERT_BUFFER_MULTIPLIER", 5)
+        expert_ratio = getattr(Config, "EXPERT_BUFFER_RATIO", 0.2)
+        per_alpha = getattr(Config, "PER_ALPHA", 0.6)
+        per_beta = getattr(Config, "PER_BETA_START", 0.4)
+
+        # Expert buffer 容量 = 专家数（常驻，不可覆盖）
+        # Normal buffer 容量 = (multiplier - 1) × 专家数（环形覆盖）
+        expert_capacity = n_expert
+        normal_capacity = (buffer_multiplier - 1) * n_expert
+
+        # 创建 Agent
+        agent = DQNAgent(
+            n_movable=Config.MAX_MOVABLE,
+            grid_w=Config.GRID_W,
+            grid_h=Config.GRID_H,
+            device=self.device,
+            lr=Config.LEARNING_RATE,
+            gamma=Config.GAMMA,
+        )
+
+        # 加载 BC 预训练权重（如果存在）
+        bc_ckpt_path = os.path.join(self.save_dir, "bc_pretrained.pt")
+        if os.path.isfile(bc_ckpt_path):
+            agent.load(bc_ckpt_path)
+            logger.info(f"Phase 2: loaded BC pretrained weights from {bc_ckpt_path}")
+        else:
+            logger.warning("Phase 2: BC checkpoint not found, starting from scratch")
+
+        # 创建 ExpertReplayBuffer
+        buffer = ExpertReplayBuffer(
+            expert_capacity=expert_capacity,
+            normal_capacity=normal_capacity,
+            expert_ratio=expert_ratio,
+            per_alpha=per_alpha,
+            per_beta=per_beta,
+        )
+
+        # 加载专家 transition 到常驻区
+        buffer.load_expert_transitions(all_expert_transitions)
+
+        logger.info(
+            f"Phase 2 setup: ExpertReplayBuffer "
+            f"(expert={expert_capacity}, normal={normal_capacity}, "
+            f"total={expert_capacity + normal_capacity}, "
+            f"ratio={expert_ratio}, PER α={per_alpha}, β={per_beta})"
+        )
+
+        return agent, buffer
+
     # ==================== 工具方法 ====================
 
     def _init_agent_and_buffer(self):
@@ -423,9 +649,25 @@ class Runner:
         return PCBLayoutEnv(pcb_path, config_path=config_path)
 
     def _get_pcb_files(self) -> list:
-        """递归扫描数据目录获取所有 PCB 文件（委托到 utils.pcb_scan）。"""
+        """递归扫描数据目录获取所有 PCB 文件（委托到 utils.pcb_scan），可选过滤板子名。"""
         from utils.pcb_scan import find_pcb_files
-        return find_pcb_files(self.data_dir)
+        all_files = find_pcb_files(self.data_dir)
+
+        # 按 --board 参数过滤
+        board_filter = getattr(self.args, "board", None)
+        if board_filter:
+            filtered = [f for f in all_files if board_filter in os.path.basename(f)]
+            if not filtered:
+                logger.warning(
+                    f"Board filter '{board_filter}' matched no files, "
+                    f"using all {len(all_files)} files"
+                )
+                return all_files
+            logger.info(
+                f"Board filter '{board_filter}' matched {len(filtered)}/{len(all_files)} files"
+            )
+            return filtered
+        return all_files
 
     def _log_episode(
         self, pcb_name: str, total_reward: float,
@@ -454,30 +696,44 @@ class Runner:
         )
 
     def _backup_previous_results(self):
-        """训练开始前备份旧 best_model.pt，最多保留 5 份。"""
-        best_path = os.path.join(self.save_dir, "best_model.pt")
-        if not os.path.isfile(best_path):
-            return
+        """训练开始前备份旧产物，每种最多保留 5 份。
 
+        保护的产物：best_model.pt / training_log.txt / bc_loss_history.json。
+        bc_pretrained.pt 不备份（Phase 2 加载后即被 best_model.pt 继承，无需存档）。
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_dir = os.path.join(self.save_dir, "backup")
         os.makedirs(backup_dir, exist_ok=True)
 
-        backup_name = f"best_model_{timestamp}.pt"
-        dst = os.path.join(backup_dir, backup_name)
-        shutil.move(best_path, dst)
-        logger.info(f"Backed up: best_model.pt → backup/{backup_name}")
+        # 备份的产物及对应的备份命名模板
+        artifacts = [
+            ("best_model.pt", f"best_model_{{ts}}.pt"),
+            ("training_log.txt", f"training_log_{{ts}}.txt"),
+            ("bc_loss_history.json", f"bc_loss_history_{{ts}}.json"),
+        ]
 
-        # 清理旧备份：超过 5 份删最旧的
-        all_backups = sorted(glob.glob(os.path.join(backup_dir, "best_model_*.pt")))
-        while len(all_backups) > 5:
-            oldest = all_backups[0]
-            try:
-                os.remove(oldest)
-                logger.info(f"Removed old backup: backup/{os.path.basename(oldest)}")
-            except OSError:
-                pass
-            all_backups.pop(0)
+        for src_name, backup_tpl in artifacts:
+            src_path = os.path.join(self.save_dir, src_name)
+            if not os.path.isfile(src_path):
+                continue
+            backup_name = backup_tpl.format(ts=timestamp)
+            dst = os.path.join(backup_dir, backup_name)
+            shutil.move(src_path, dst)
+            logger.info(f"Backed up: {src_name} → backup/{backup_name}")
+
+            # 按类型清理旧备份：最多保留 5 份
+            prefix = backup_name.rsplit("_2", 1)[0]  # "best_model" / "training_log" / "bc_loss_history"
+            ext = backup_name.rsplit(".", 1)[-1]
+            pattern = os.path.join(backup_dir, f"{prefix}_*.{ext}")
+            all_backups = sorted(glob.glob(pattern))
+            while len(all_backups) > 5:
+                oldest = all_backups[0]
+                try:
+                    os.remove(oldest)
+                    logger.info(f"Removed old backup: backup/{os.path.basename(oldest)}")
+                except OSError:
+                    pass
+                del all_backups[0]
 
     def _plot_loss_curve(self, pcb_name: str):
         """生成 Loss-Episode 曲线图，保存到 result/<board>/ 子目录。
@@ -500,11 +756,35 @@ class Runner:
 
         plot_loss_curve(loss_history, png_path, pcb_name=pcb_short, window=100)
 
+    def _plot_reward_curve(self, pcb_name: str):
+        """生成 Reward-Episode 曲线图，保存到 result/<board>/ 子目录。
+
+        与 _plot_loss_curve 对称：写 reward_history.json + 输出 reward_curve.png。
+        仅统计正式训练阶段的 reward（warmup 阶段不记录）。
+
+        Args:
+            pcb_name: PCB 文件名
+        """
+        from utils.visualization import plot_reward_curve
+
+        pcb_short = pcb_name.replace(".kicad_pcb", "")
+        board_dir = os.path.join(self.save_dir, pcb_short)
+        os.makedirs(board_dir, exist_ok=True)
+
+        reward_history = self.per_board_reward_history.get(pcb_name, [])
+        json_path = os.path.join(board_dir, "reward_history.json")
+        png_path = os.path.join(board_dir, "reward_curve.png")
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(reward_history, f, ensure_ascii=False)
+
+        plot_reward_curve(reward_history, png_path, pcb_name=pcb_short, window=100)
+
     # ==================== 最佳布局追踪 ====================
 
     def _snapshot_state(self, env: PCBLayoutEnv) -> dict:
         """提取 env 中所有元件的完整状态快照。"""
-        from scripts.run_inference import snapshot_state
+        from run_inference import snapshot_state
         return snapshot_state(env)
 
     def _export_best_layout(self, pcb_name: str, best_state: dict,

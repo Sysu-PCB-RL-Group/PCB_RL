@@ -6,9 +6,7 @@
 
 import sys
 import os
-
-# 确保项目根目录在 path 中
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import glob
 
 import json
 import logging
@@ -28,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "output"))
+OUTPUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "output"))
 
 
 # ==================== 状态快照 ====================
@@ -347,6 +345,7 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
         logger.warning(f"跳过无法加载的板: {pcb_name}: {e}")
         return
 
+    file_handler = None
     try:
         # 创建输出目录
         pcb_output_dir = os.path.join(OUTPUT_DIR, pcb_name)
@@ -368,7 +367,8 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
             f"N_movable={env.N_movable}, grid=({env.grid_width},{env.grid_height})"
         )
 
-        # 推理配置
+        # 推理配置：关闭早停 + 宽松出界惩罚
+        saved_early_stop = Config.EARLY_STOP_THRESHOLD
         Config.EARLY_STOP_THRESHOLD = float("-inf")
         env.W_OUT_OF_BOUNDS_CURRENT = Config.W_OUT_OF_BOUNDS_INITIAL
 
@@ -468,11 +468,15 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
                 draw_layout(components_for_viz, board_bounds, png_path, title=title)
                 logger.info(f"[FILE] Layout visualization saved: {png_path}")
 
+        # 恢复全局配置
+        Config.EARLY_STOP_THRESHOLD = saved_early_stop
+
         logger.info(f"[OK] Inference finished for {pcb_name}. See output/{pcb_name}/ for results.\n")
 
     finally:
         env.close()
-        logger.removeHandler(file_handler)
+        if file_handler is not None:
+            logger.removeHandler(file_handler)
 
 
 def main():
@@ -487,7 +491,7 @@ def main():
     parser.add_argument(
         "--pcb", type=str,
         default=os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..", "data", "kicad-native-batch",
+            os.path.dirname(__file__), "data", "kicad-native-batch",
         )),
         help=".kicad_pcb 文件路径或 batch 根目录 (默认：data/kicad-native-batch/).",
     )
@@ -544,11 +548,30 @@ def main():
             f"slots={Config.MAX_MOVABLE}×8, grid=({Config.GRID_W},{Config.GRID_H})"
         )
 
-    # ---- 清理旧 output（仅一次） ----
+    # ---- 旧 output 轮转备份（最多 5 份） ----
     import shutil
+    from datetime import datetime
     if os.path.isdir(OUTPUT_DIR):
-        shutil.rmtree(OUTPUT_DIR)
-        logger.info(f"Cleaned old output: {OUTPUT_DIR}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir = os.path.join(OUTPUT_DIR, "..", "output_backup")
+        os.makedirs(backup_dir, exist_ok=True)
+
+        backup_name = f"output_{timestamp}"
+        backup_dst = os.path.join(backup_dir, backup_name)
+        shutil.move(OUTPUT_DIR, backup_dst)
+        logger.info(f"Backed up old output → output_backup/{backup_name}")
+
+        # 清理旧备份：超过 5 份删最旧的
+        all_backups = sorted(glob.glob(os.path.join(backup_dir, "output_*")))
+        while len(all_backups) > 5:
+            oldest = all_backups[0]
+            try:
+                shutil.rmtree(oldest)
+                logger.info(f"Removed old output backup: output_backup/{os.path.basename(oldest)}")
+            except OSError:
+                pass
+            del all_backups[0]
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ---- 逐个板子推理 ----

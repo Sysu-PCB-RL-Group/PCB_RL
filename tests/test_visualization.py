@@ -113,3 +113,43 @@ def test_draw_with_zero_size_component():
         assert os.path.getsize(tmp) > 100
     finally:
         os.unlink(tmp)
+
+
+def test_plot_reward_curve_normal():
+    """正常 reward 数据（含正负值）→ 生成 PNG 文件。"""
+    from utils.visualization import plot_reward_curve
+    # 300 条数据，覆盖正负 reward，模拟训练中 reward 逐步上升
+    history = [(i, (i - 150) + 10 * (i % 3)) for i in range(300)]
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp = f.name
+    try:
+        plot_reward_curve(history, tmp, pcb_name="test_board", window=100)
+        assert os.path.getsize(tmp) > 100, "PNG file should not be empty"
+    finally:
+        os.unlink(tmp)
+
+
+def test_plot_reward_curve_insufficient_data():
+    """数据不足 window → 不生成文件。"""
+    from utils.visualization import plot_reward_curve
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp = f.name
+    # 先删除临时文件：函数应因数据不足直接 return，不重建文件
+    os.unlink(tmp)
+    history = [(i, float(i)) for i in range(50)]  # 50 < window=100
+    plot_reward_curve(history, tmp, window=100)
+    assert not os.path.exists(tmp), "数据不足 window 时不应生成文件"
+
+
+def test_plot_reward_curve_exact_window_and_plus_one():
+    """边界：恰好 window 条与 window+1 条 → 均应正常生成 PNG。"""
+    from utils.visualization import plot_reward_curve
+    for n in (100, 101):
+        history = [(i, float(i) * (1 if i % 2 == 0 else -1)) for i in range(n)]
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp = f.name
+        try:
+            plot_reward_curve(history, tmp, window=100)
+            assert os.path.getsize(tmp) > 100, f"{n} 条应生成非空 PNG"
+        finally:
+            os.unlink(tmp)

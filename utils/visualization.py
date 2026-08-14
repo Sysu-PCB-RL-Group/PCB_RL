@@ -221,6 +221,40 @@ def draw_layout(
     logger.debug(f"Layout saved to: {output_path}")
 
 
+# ==================== 曲线平滑工具 ====================
+
+
+def _smooth_curve(
+    raw_eps: List[int], raw_values: List[float], window: int
+) -> Tuple[List[int], List[float], List[float], List[float]]:
+    """按 window 分块取中位数，并计算每块的 min/max 带。
+
+    plot_loss_curve 与 plot_reward_curve 共享此逻辑，避免重复导致漂移。
+
+    Args:
+        raw_eps: 原始 episode 编号列表
+        raw_values: 原始数值列表（loss 或 reward）
+        window: 平滑窗口大小（episode 数）
+
+    Returns:
+        (smoothed_eps, smoothed_medians, smoothed_mins, smoothed_maxs) 四元组
+    """
+    smoothed_eps: List[int] = []
+    smoothed_medians: List[float] = []
+    smoothed_mins: List[float] = []
+    smoothed_maxs: List[float] = []
+    for i in range(0, len(raw_values), window):
+        chunk = raw_values[i:i + window]
+        if not chunk:
+            continue
+        arr = np.array(chunk)
+        smoothed_eps.append(raw_eps[i + len(chunk) // 2])
+        smoothed_medians.append(float(np.median(arr)))
+        smoothed_mins.append(float(np.min(arr)))
+        smoothed_maxs.append(float(np.max(arr)))
+    return smoothed_eps, smoothed_medians, smoothed_mins, smoothed_maxs
+
+
 # ==================== Loss-Episode 曲线 ====================
 
 
@@ -245,26 +279,20 @@ def plot_loss_curve(
     _setup_chinese_font()
 
     if len(loss_history) < window:
-        return  # 数据不够，不画
+        logger.info(
+            f"Loss curve skipped: only {len(loss_history)} episodes "
+            f"(< window={window}), no plot generated"
+        )
+        return
 
     # 提取原始数据
     raw_eps = [ep for ep, _ in loss_history]
     raw_losses = [loss for _, loss in loss_history]
 
     # ---- 按 window 分块取中位数 + min/max 带 ----
-    smoothed_eps = []
-    smoothed_losses = []
-    smoothed_mins = []
-    smoothed_maxs = []
-    for i in range(0, len(raw_losses), window):
-        chunk = raw_losses[i:i + window]
-        if not chunk:
-            continue
-        arr = np.array(chunk)
-        smoothed_eps.append(raw_eps[i + len(chunk) // 2])
-        smoothed_losses.append(float(np.median(arr)))
-        smoothed_mins.append(float(np.min(arr)))
-        smoothed_maxs.append(float(np.max(arr)))
+    smoothed_eps, smoothed_losses, smoothed_mins, smoothed_maxs = _smooth_curve(
+        raw_eps, raw_losses, window
+    )
 
     # ---- 绘图 ----
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
@@ -297,3 +325,76 @@ def plot_loss_curve(
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info(f"Loss curve saved to: {output_path}")
+
+
+# ==================== Reward-Episode 曲线 ====================
+
+
+def plot_reward_curve(
+    reward_history: List[Tuple[int, float]],
+    output_path: str,
+    pcb_name: str = "",
+    window: int = 100,
+    dpi: int = 150,
+):
+    """绘制 Reward-Episode 训练曲线。
+
+    原始 reward 按 {window} episode 分组取中位数平滑，避免单点异常抖动。
+    与 plot_loss_curve 结构对称，但 reward 可正可负且期望上升，故使用线性轴。
+
+    Args:
+        reward_history: [(episode_num, reward), ...] 列表
+        output_path: 输出 PNG 路径
+        pcb_name: PCB 名称（用于标题）
+        window: 平滑窗口大小（episode 数）
+        dpi: 分辨率
+    """
+    _setup_chinese_font()
+
+    if len(reward_history) < window:
+        logger.info(
+            f"Reward curve skipped: only {len(reward_history)} episodes "
+            f"(< window={window}), no plot generated"
+        )
+        return
+
+    # 提取原始数据
+    raw_eps = [ep for ep, _ in reward_history]
+    raw_rewards = [r for _, r in reward_history]
+
+    # ---- 按 window 分块取中位数 + min/max 带 ----
+    smoothed_eps, smoothed_rewards, smoothed_mins, smoothed_maxs = _smooth_curve(
+        raw_eps, raw_rewards, window
+    )
+
+    # ---- 绘图 ----
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+    # 子图 1：原始 reward（线性轴 + 小散点）
+    ax1.scatter(raw_eps, raw_rewards, s=1, alpha=0.12, color="#2E7D32",
+                label="原始 reward")
+    ax1.plot(smoothed_eps, smoothed_rewards, linewidth=2, color="#E53935",
+             label=f"中位数 ({window}ep 窗口)")
+    ax1.set_ylabel("Reward", fontsize=11)
+    ax1.legend(fontsize=9, loc="upper left")
+    ax1.grid(True, alpha=0.3)
+
+    # 子图 2：平滑 reward + min/max 带
+    ax2.fill_between(smoothed_eps, smoothed_mins, smoothed_maxs,
+                     alpha=0.15, color="#2E7D32", label=f"min~max ({window}ep 窗口)")
+    ax2.plot(smoothed_eps, smoothed_rewards, linewidth=2.5, color="#2E7D32",
+             label=f"中位数 ({window}ep)")
+    ax2.set_xlabel("Episode", fontsize=11)
+    ax2.set_ylabel("Reward (中位数)", fontsize=11)
+    ax2.legend(fontsize=9, loc="upper left")
+    ax2.grid(True, alpha=0.3)
+
+    # 标题
+    title = f"Reward-Episode 训练曲线 — {pcb_name}" if pcb_name else "Reward-Episode 训练曲线"
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.98)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info(f"Reward curve saved to: {output_path}")

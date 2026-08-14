@@ -297,6 +297,7 @@ def test_early_stop_on_low_reward():
     assert env.N_movable >= 2, "Need at least 2 movable components"
 
     old_threshold = Config.EARLY_STOP_THRESHOLD
+    old_overlap_hard = Config.W_OVERLAP_HARD
     Config.EARLY_STOP_THRESHOLD = -10.0
     Config.W_OVERLAP_HARD = 10000
     try:
@@ -320,7 +321,7 @@ def test_early_stop_on_low_reward():
         )
     finally:
         Config.EARLY_STOP_THRESHOLD = old_threshold
-        Config.W_OVERLAP_HARD = 100.0
+        Config.W_OVERLAP_HARD = old_overlap_hard
 
 
 def test_action_space_on_mock_env():

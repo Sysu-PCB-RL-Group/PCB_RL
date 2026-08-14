@@ -370,8 +370,8 @@ def load_pcb_from_json(json_path: str) -> MockKiCadUtils:
             is_placed=comp_data.get("is_placed", False),
             nets=comp_data.get("nets", []),
             pins=[tuple(p) for p in comp_data.get("pins", [])],
-            footprint_w=comp_data.get("footprint_w", 5.0),
-            footprint_h=comp_data.get("footprint_h", 5.0),
+            footprint_w=comp_data.get("footprint_w", 0.0),
+            footprint_h=comp_data.get("footprint_h", 0.0),
         )
         kicad.components[comp.id] = comp
 

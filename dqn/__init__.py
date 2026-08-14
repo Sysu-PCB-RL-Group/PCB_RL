@@ -4,7 +4,7 @@
 """
 
 from .network import DQN
-from .replay_buffer import ReplayBuffer
+from .replay_buffer import ReplayBuffer, ExpertReplayBuffer
 from .agent import DQNAgent
 
-__all__ = ['DQN', 'ReplayBuffer', 'DQNAgent']
+__all__ = ['DQN', 'ReplayBuffer', 'ExpertReplayBuffer', 'DQNAgent']
