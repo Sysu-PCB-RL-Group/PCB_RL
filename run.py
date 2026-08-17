@@ -60,6 +60,7 @@ class Runner:
 
         # 随机种子
         seed = getattr(args, "seed", 114514)
+        random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
@@ -406,6 +407,10 @@ class Runner:
     def _compute_epsilon(self, pcb_name: str) -> float:
         """跨 episode 指数衰减 epsilon（per-board 独立计数）。
 
+        衰减基准自适应：按单板预算（total_episodes / 板数）收敛，且不低于
+        EPSILON_DECAY_EPISODES。单板时即按 total_episodes 收敛；多板时折算到
+        每板实际训练次数，避免 ε 被全局 total_episodes 稀释而收敛不到下限。
+
         Args:
             pcb_name: 板子名
 
@@ -417,7 +422,15 @@ class Runner:
         t = self.per_board_episode.get(pcb_name, 0)
         if t <= 0:
             return eps_start
-        return eps_min + (eps_start - eps_min) * math.exp(-4.0 * t / Config.EPSILON_DECAY_EPISODES)
+        total_episodes = getattr(self, "total_episodes", Config.TOTAL_EPISODES)
+        # ε 用 per-board 独立计数 t，衰减基准也需折算到单板预算：
+        # 单板（n_boards=1）时 budget == total_episodes，与原需求一致；
+        # 多板时每板平均只训练 total_episodes/n_boards 次，若不折算，
+        # t 永远达不到 total_episodes，ε 收敛不到 EPSILON_MIN。
+        n_boards = max(1, len(getattr(self, "pcb_pool", [])))
+        per_board_budget = total_episodes / n_boards
+        decay_episodes = max(Config.EPSILON_DECAY_EPISODES, per_board_budget)
+        return eps_min + (eps_start - eps_min) * math.exp(-4.0 * t / decay_episodes)
 
     def _compute_curriculum_weight(self, pcb_name: str) -> float:
         """跨 episode 线性递增出界惩罚权重（per-board 独立）。
@@ -450,6 +463,11 @@ class Runner:
         Returns:
             全部专家 transition 的列表
         """
+        # 基线组（use_expert=False）不接触专家数据，直接短路返回
+        if not self.use_expert:
+            logger.info("专家注入已禁用，跳过专家轨迹生成/加载")
+            return []
+
         # 读取专家注入超参数
         trajectories_per_board = getattr(Config, "EXPERT_TRAJECTORIES_PER_BOARD", 20)
         epsilon_decompose = getattr(Config, "EXPERT_EPSILON_DECOMPOSE", 0.5)

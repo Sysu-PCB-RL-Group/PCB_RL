@@ -43,7 +43,7 @@ class Config:
     EARLY_STOP_THRESHOLD: float = -150.0
     EPSILON_START: float = 0.6
     EPSILON_MIN: float = 0.1
-    EPSILON_DECAY_EPISODES: int = 10000  # ε 衰减参考 ep 数（与 TOTAL_EPISODES 解耦）
+    EPSILON_DECAY_EPISODES: int = 10000  # ε 衰减最短收敛区间（下限），总 epi 超过此值时按实际总 epi 收敛
     CURRICULUM_START_EP: int = 0
     CURRICULUM_END_EP: int = 500
 
@@ -366,33 +366,9 @@ class PCBLayoutEnv(gym.Env):
         component.rotation = rot_idx
         component.layer = lay_idx
 
-        # 6. 约束检测
-        total_hard_overlap = 0.0
-        total_soft_spacing = 0.0
-
-        # C2: 与 fixed_list + placed_list 中元件的碰撞检测
-        all_placed = [self.kicad.components[rid] for rid in self.placed_list]
-        all_fixed_comps = self.fixed_list + all_placed
-
-        for other in all_fixed_comps:
-            if other.id == component.id:
-                continue
-            threshold = Config.spacing_threshold_for(
-                component.package_type, other.package_type
-            )
-            hard, soft = PCBUtils.bbox_overlap_penalty(
-                component.bbox, other.bbox, threshold
-            )
-            total_hard_overlap += hard
-            total_soft_spacing += soft
-
-        # C3: 出界检测
-        total_out_of_bounds = PCBUtils.out_of_bounds_area(
-            component.bbox, self.valid_area
-        )
-
-        # 禁止区域
-        in_keepout = PCBUtils.check_keepout(component.bbox, self.keepout_zones)
+        # 6. 约束检测（复用 _detect_collisions，与专家轨迹生成共享同一套碰撞标准）
+        total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
+            self._detect_collisions(component)
 
         # 7. 计算 reward
         has_violations = (total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout)
@@ -628,6 +604,48 @@ class PCBLayoutEnv(gym.Env):
             return 1.0
         return (ep - start) / ramp
 
+    def _detect_collisions(self, component) -> Tuple[float, float, float, bool]:
+        """检测当前元件与已放置/固定元件的碰撞、出界与禁止区情况。
+
+        供 env.step() 与专家轨迹生成共享，保证两处使用完全一致的
+        碰撞判定标准（硬重叠、软间距、出界、keepout）。
+
+        Args:
+            component: 当前放置的元件（bbox/rotation/layer 已更新为目标位置，
+                is_placed 尚未置 True，不在 placed_list 中）
+
+        Returns:
+            (total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout)
+        """
+        total_hard_overlap = 0.0
+        total_soft_spacing = 0.0
+
+        # C2: 与 fixed_list + placed_list 中元件的碰撞检测
+        all_placed = [self.kicad.components[rid] for rid in self.placed_list]
+        all_fixed_comps = self.fixed_list + all_placed
+
+        for other in all_fixed_comps:
+            if other.id == component.id:
+                continue
+            threshold = Config.spacing_threshold_for(
+                component.package_type, other.package_type
+            )
+            hard, soft = PCBUtils.bbox_overlap_penalty(
+                component.bbox, other.bbox, threshold
+            )
+            total_hard_overlap += hard
+            total_soft_spacing += soft
+
+        # C3: 出界检测
+        total_out_of_bounds = PCBUtils.out_of_bounds_area(
+            component.bbox, self.valid_area
+        )
+
+        # 禁止区域
+        in_keepout = PCBUtils.check_keepout(component.bbox, self.keepout_zones)
+
+        return total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout
+
     def _calculate_reward(
         self,
         component,
@@ -635,6 +653,7 @@ class PCBLayoutEnv(gym.Env):
         total_soft_spacing: float,
         total_out_of_bounds: float,
         has_violations: bool,
+        quality_scale: Optional[float] = None,
     ) -> float:
         """计算 reward。
 
@@ -648,11 +667,14 @@ class PCBLayoutEnv(gym.Env):
             total_soft_spacing: 软间距累计惩罚
             total_out_of_bounds: 出界累计面积
             has_violations: 是否存在任何违规
+            quality_scale: 品质项权重缩放系数；None 时按 current_episode 升温
+                （训练路径），否则用传入值（专家轨迹传 1.0 表示理想布局满分）
 
         Returns:
             标量 reward 值
         """
-        quality_scale = self._get_quality_scale()
+        if quality_scale is None:
+            quality_scale = self._get_quality_scale()
         reward = 0.0
         breakdown = {}
 

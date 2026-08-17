@@ -21,7 +21,7 @@ venv/
 *.log
 
 # Generated output (推理产物)
-output/
+output*/
 
 # Training checkpoints & output
 result*/

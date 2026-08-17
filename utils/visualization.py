@@ -398,3 +398,176 @@ def plot_reward_curve(
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info(f"Reward curve saved to: {output_path}")
+
+
+# ==================== 对比版曲线（A/B 两组同一坐标系） ====================
+
+_COMPARE_COLORS = ["#1565C0", "#E65100"]  # A=蓝, B=橙
+
+
+def _plot_compare_group(
+    ax1, ax2, history, label, color, metric, window,
+):
+    """将一组 (episode, value) 序列画到对比双子图上。
+
+    子图 1 画原始散点，子图 2 画 window 分块中位数 + min/max 带。
+    plot_loss_compare 与 plot_reward_compare 共享此逻辑，避免重复导致漂移。
+
+    Args:
+        ax1: 上子图（原始散点）
+        ax2: 下子图（平滑中位数 + min/max 带）
+        history: [(episode_num, value), ...] 列表
+        label: 图例标签
+        color: 曲线颜色
+        metric: 指标名（"loss" / "reward"），用于图例文案
+        window: 平滑窗口大小（episode 数）
+    """
+    if not history:
+        return
+    raw_eps = [ep for ep, _ in history]
+    raw_vals = [v for _, v in history]
+
+    # 子图 1：原始散点
+    ax1.scatter(raw_eps, raw_vals, s=1, alpha=0.12, color=color,
+                label=f"原始 {metric} ({label})")
+
+    if len(history) < window:
+        return
+    smoothed_eps, smoothed_medians, smoothed_mins, smoothed_maxs = _smooth_curve(
+        raw_eps, raw_vals, window
+    )
+    ax1.plot(smoothed_eps, smoothed_medians, linewidth=2, color=color,
+             label=f"中位数 ({label}, {window}ep)")
+    # 子图 2：平滑中位数 + min/max 带
+    ax2.fill_between(smoothed_eps, smoothed_mins, smoothed_maxs,
+                     alpha=0.15, color=color,
+                     label=f"min~max ({label}, {window}ep)")
+    ax2.plot(smoothed_eps, smoothed_medians, linewidth=2.5, color=color,
+             label=f"中位数 ({label}, {window}ep)")
+
+
+def plot_loss_compare(
+    loss_a: List[Tuple[int, float]],
+    loss_b: List[Tuple[int, float]],
+    labels: List[str],
+    output_path: str,
+    pcb_name: str = "",
+    window: int = 100,
+    dpi: int = 150,
+):
+    """绘制两组 Loss-Episode 对比曲线（A/B 共用同一坐标系）。
+
+    与 plot_loss_curve 结构一致（双子图：原始散点 + 平滑中位数/带），
+    但 A/B 两组数据画在同一 axes 上，用颜色区分，保证 x/y 颗粒度一致。
+
+    Args:
+        loss_a: A 组 [(episode_num, avg_loss), ...] 列表
+        loss_b: B 组 [(episode_num, avg_loss), ...] 列表
+        labels: 两组图例标签（长度 2，如 ["with_expert", "baseline"]）
+        output_path: 输出 PNG 路径
+        pcb_name: PCB 名称（用于标题）
+        window: 平滑窗口大小（episode 数）
+        dpi: 分辨率
+    """
+    _setup_chinese_font()
+
+    labels = labels or ["A", "B"]
+    label_a = labels[0] if len(labels) > 0 else "A"
+    label_b = labels[1] if len(labels) > 1 else "B"
+
+    if len(loss_a) < window and len(loss_b) < window:
+        logger.info(
+            f"Loss compare skipped: both groups < window={window}, no plot generated"
+        )
+        return
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+    for history, label, color in (
+        (loss_a, label_a, _COMPARE_COLORS[0]),
+        (loss_b, label_b, _COMPARE_COLORS[1]),
+    ):
+        _plot_compare_group(ax1, ax2, history, label, color, "loss", window)
+
+    ax1.set_yscale("log")
+    ax1.set_ylabel("Loss (log)", fontsize=11)
+    ax1.legend(fontsize=9, loc="upper right")
+    ax1.grid(True, alpha=0.3)
+
+    ax2.set_xlabel("Episode", fontsize=11)
+    ax2.set_ylabel("Loss (中位数)", fontsize=11)
+    ax2.legend(fontsize=9, loc="upper right")
+    ax2.grid(True, alpha=0.3)
+
+    # 标题
+    title = f"Loss-Episode 对比曲线 — {pcb_name}" if pcb_name else "Loss-Episode 对比曲线"
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.98)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info(f"Loss compare curve saved to: {output_path}")
+
+
+def plot_reward_compare(
+    reward_a: List[Tuple[int, float]],
+    reward_b: List[Tuple[int, float]],
+    labels: List[str],
+    output_path: str,
+    pcb_name: str = "",
+    window: int = 100,
+    dpi: int = 150,
+):
+    """绘制两组 Reward-Episode 对比曲线（A/B 共用同一坐标系）。
+
+    与 plot_reward_curve 结构一致（reward 可正可负且期望上升，使用线性轴），
+    但 A/B 两组数据画在同一 axes 上，用颜色区分，保证 x/y 颗粒度一致。
+
+    Args:
+        reward_a: A 组 [(episode_num, reward), ...] 列表
+        reward_b: B 组 [(episode_num, reward), ...] 列表
+        labels: 两组图例标签（长度 2，如 ["with_expert", "baseline"]）
+        output_path: 输出 PNG 路径
+        pcb_name: PCB 名称（用于标题）
+        window: 平滑窗口大小（episode 数）
+        dpi: 分辨率
+    """
+    _setup_chinese_font()
+
+    labels = labels or ["A", "B"]
+    label_a = labels[0] if len(labels) > 0 else "A"
+    label_b = labels[1] if len(labels) > 1 else "B"
+
+    if len(reward_a) < window and len(reward_b) < window:
+        logger.info(
+            f"Reward compare skipped: both groups < window={window}, no plot generated"
+        )
+        return
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+    for history, label, color in (
+        (reward_a, label_a, _COMPARE_COLORS[0]),
+        (reward_b, label_b, _COMPARE_COLORS[1]),
+    ):
+        _plot_compare_group(ax1, ax2, history, label, color, "reward", window)
+
+    ax1.set_ylabel("Reward", fontsize=11)
+    ax1.legend(fontsize=9, loc="upper left")
+    ax1.grid(True, alpha=0.3)
+
+    ax2.set_xlabel("Episode", fontsize=11)
+    ax2.set_ylabel("Reward (中位数)", fontsize=11)
+    ax2.legend(fontsize=9, loc="upper left")
+    ax2.grid(True, alpha=0.3)
+
+    # 标题
+    title = f"Reward-Episode 对比曲线 — {pcb_name}" if pcb_name else "Reward-Episode 对比曲线"
+    fig.suptitle(title, fontsize=13, fontweight="bold", y=0.98)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+    fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info(f"Reward compare curve saved to: {output_path}")

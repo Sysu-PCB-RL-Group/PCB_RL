@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from env.pcb_layout_env import Config
+
 logger = logging.getLogger(__name__)
 
 # ===================== 默认超参数（可被 argument.txt 覆盖） =====================
@@ -156,7 +158,7 @@ class ExpertTrajectoryGenerator:
 
         # 位置变异：20% 概率 ±1 格
         if random.random() < self.pos_noise_prob:
-            cell_size = 1.0  # Config.CELL_SIZE = 1.0
+            cell_size = Config.CELL_SIZE
             direction = random.choice(["x", "y"])
             offset = random.choice([-1, 1]) * cell_size
 
@@ -240,8 +242,8 @@ class ExpertTrajectoryGenerator:
             target_layer = mutated["layer"]
 
             # 计算网格坐标
-            gx1 = int(round((target_bbox[0] - env.valid_area[0]) / 1.0))  # CELL_SIZE=1.0
-            gy1 = int(round((target_bbox[1] - env.valid_area[1]) / 1.0))
+            gx1 = int(round((target_bbox[0] - env.valid_area[0]) / Config.CELL_SIZE))
+            gy1 = int(round((target_bbox[1] - env.valid_area[1]) / Config.CELL_SIZE))
             # clamp 到网格范围
             gx1 = max(0, min(gx1, env.grid_width - 1))
             gy1 = max(0, min(gy1, env.grid_height - 1))
@@ -328,9 +330,8 @@ class ExpertTrajectoryGenerator:
         is_last_placement = (len(env.placed_list) + 1 == env.N_movable)
         done = is_last_placement
 
-        # 计算专家 reward（全部正确放置，无违规）
-        # 使用简化的正向 reward 计算
-        expert_reward = self._compute_expert_reward(env, placement_step)
+        # 计算专家 reward（复用环境完整 reward，含品质项，标准与训练一致）
+        expert_reward = self._compute_expert_reward(env, comp_idx, expert_actions)
 
         # 按 share_weights 分配到各子步骤
         share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]
@@ -350,7 +351,7 @@ class ExpertTrajectoryGenerator:
                 comp = env.movable_list[comp_idx]
                 saved_state = (comp.bbox, comp.rotation, comp.layer, comp.is_placed, list(env.placed_list))
                 # 用 grid 坐标 + 实际 footprint 重建 bbox（而非 1×1 cell）
-                cell_size = 1.0
+                cell_size = Config.CELL_SIZE
                 x1 = env.valid_area[0] + expert_actions[1] * cell_size
                 y1 = env.valid_area[1] + expert_actions[2] * cell_size
                 comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
@@ -378,32 +379,50 @@ class ExpertTrajectoryGenerator:
 
         return transitions
 
-    def _compute_expert_reward(self, env, placement_step: int) -> float:
-        """计算专家放置的正向 reward。
+    def _compute_expert_reward(self, env, comp_idx: int, expert_actions: List[int]) -> float:
+        """计算专家放置的完整 reward（与训练环境 _calculate_reward 完全一致）。
 
-        使用简化的 reward 计算：基础完成奖励 + 品质奖励。
+        专家轨迹代表理想最终布局，因此 quality_scale 强制为 1.0（品质项完全
+        生效），复用 env._detect_collisions + env._calculate_reward，保证专家
+        注入的 reward 标签与训练 reward 标准同步（含品质项，而非仅完成奖励）。
 
         Args:
             env: PCBLayoutEnv 实例
-            placement_step: 放置序号
+            comp_idx: 元件在 movable_list 中的索引
+            expert_actions: [comp_idx, gx1, gy1, rotation, layer]
 
         Returns:
-            正向 reward 值
+            完整 reward 值
         """
-        from env.pcb_layout_env import Config
+        comp = env.movable_list[comp_idx]
 
-        reward = 0.0
+        # 保存当前元件状态，临时设为专家目标位置（与 _build_step_transitions
+        # 中 next_obs 的重建方式一致），保持 is_placed=False、不加入 placed_list，
+        # 与 env.step() 调用 _calculate_reward 时的状态约定一致。
+        saved = (comp.bbox, comp.rotation, comp.layer)
+        cell_size = Config.CELL_SIZE
+        x1 = env.valid_area[0] + expert_actions[1] * cell_size
+        y1 = env.valid_area[1] + expert_actions[2] * cell_size
+        comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
+        comp.rotation = expert_actions[3]
+        comp.layer = expert_actions[4]
 
-        # 完成奖励：每个元件成功放置 = W_COMPLETION / N_movable
-        completion_partial = Config.W_COMPLETION / max(env.N_movable, 1)
-        reward += completion_partial
-
-        # 最后一个元件额外奖励
-        if placement_step + 1 == env.N_movable:
-            completion_bonus = Config.W_COMPLETION - completion_partial * env.N_movable
-            reward += completion_bonus
-
-        return reward
+        try:
+            total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
+                env._detect_collisions(comp)
+            has_violations = (
+                total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout
+            )
+            return env._calculate_reward(
+                comp,
+                total_hard_overlap,
+                total_soft_spacing,
+                total_out_of_bounds,
+                has_violations,
+                quality_scale=1.0,
+            )
+        finally:
+            comp.bbox, comp.rotation, comp.layer = saved
 
     def _grid_to_bbox(
         self,
@@ -421,7 +440,7 @@ class ExpertTrajectoryGenerator:
         Returns:
             (x1, y1, x2, y2) AABB
         """
-        cell_size = 1.0  # Config.CELL_SIZE
+        cell_size = Config.CELL_SIZE
         x1 = env.valid_area[0] + gx1 * cell_size
         y1 = env.valid_area[1] + gy1 * cell_size
         # 使用 1×1 默认尺寸，实际在 transition 构造中会被覆盖

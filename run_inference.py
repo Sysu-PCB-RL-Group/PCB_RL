@@ -531,6 +531,12 @@ def main():
     # ---- 加载模型/创建 Agent（全局一份，所有板子共用） ----
     from env.pcb_layout_env import Config
 
+    # 加载训练超参数（argument.txt）与固定维度（admin.txt），
+    # 保证推理的 reward 口径与训练一致（如 W_COMPLETION 等权重）
+    _config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "config"))
+    Config.load_from_file(os.path.join(_config_dir, "argument.txt"))
+    Config.load_dims_from_file(os.path.join(_config_dir, "admin.txt"))
+
     device = torch.device("cpu")
     agent = DQNAgent(
         n_movable=Config.MAX_MOVABLE,
