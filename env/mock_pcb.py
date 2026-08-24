@@ -161,6 +161,8 @@ def build_synthetic_pcb() -> MockKiCadUtils:
     """生成一块简单的合成 PCB。
 
     板框 100×80mm，5 个可移动元件 + 2 个固定元件，3 条网络。
+    注：该合成板在 CELL_SIZE=0.2 下网格覆盖（约 490×390 格）超过统一上限
+    GRID_W/H=105，因此仅用于单元测试的逻辑校验；真实训练板的覆盖均 ≤105。
     """
     kicad = MockKiCadUtils()
     kicad.board_bounds = BOARD_BOUNDS
@@ -259,8 +261,8 @@ def _init_env_from_kicad(env, kicad: MockKiCadUtils, pcb_path: str):
         min_x + Config.BOARD_MARGIN, min_y + Config.BOARD_MARGIN,
         max_x - Config.BOARD_MARGIN, max_y - Config.BOARD_MARGIN,
     )
-    env.grid_width = max(1, int((env.valid_area[2] - env.valid_area[0]) / Config.CELL_SIZE))
-    env.grid_height = max(1, int((env.valid_area[3] - env.valid_area[1]) / Config.CELL_SIZE))
+    env.grid_width = max(1, int(round((env.valid_area[2] - env.valid_area[0]) / Config.CELL_SIZE)))
+    env.grid_height = max(1, int(round((env.valid_area[3] - env.valid_area[1]) / Config.CELL_SIZE)))
 
     env.fixed_list = [c for c in kicad.components.values() if c.is_fixed]
     env.movable_list = [c for c in kicad.components.values() if not c.is_fixed]

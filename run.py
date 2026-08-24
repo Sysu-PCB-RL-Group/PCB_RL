@@ -198,6 +198,7 @@ class Runner:
         # ---- 7. Phase 2: RL 训练 + 专家注入 ----
         if self.use_expert and self.expert_transitions_count > 0:
             agent, buffer = self._phase2_setup(all_expert_transitions, pcb_names)
+            agent.init_bc_anchor()  # 冻结 BC 策略锚点，供 RL 阶段 BC 正则化
         else:
             # 回退到标准 ReplayBuffer（不使用专家注入）
             agent, buffer = self._init_agent_and_buffer()
@@ -469,7 +470,8 @@ class Runner:
             return []
 
         # 读取专家注入超参数
-        trajectories_per_board = getattr(Config, "EXPERT_TRAJECTORIES_PER_BOARD", 20)
+        total_transitions = getattr(Config, "EXPERT_TOTAL_TRANSITIONS", 20000)
+        max_trajectories = getattr(Config, "EXPERT_MAX_TRAJECTORIES", 5000)
         epsilon_decompose = getattr(Config, "EXPERT_EPSILON_DECOMPOSE", 0.5)
         pos_noise_prob = getattr(Config, "EXPERT_POS_NOISE_PROB", 0.2)
         rot_noise_prob = getattr(Config, "EXPERT_ROT_NOISE_PROB", 0.1)
@@ -501,7 +503,8 @@ class Runner:
                     env=env,
                     pcb_name=pcb_name,
                     output_dir=self.expert_transitions_dir,
-                    trajectories_per_board=trajectories_per_board,
+                    total_transitions=total_transitions,
+                    max_trajectories=max_trajectories,
                     epsilon_decompose=epsilon_decompose,
                     pos_noise_prob=pos_noise_prob,
                     rot_noise_prob=rot_noise_prob,

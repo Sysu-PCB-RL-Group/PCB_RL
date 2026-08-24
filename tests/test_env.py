@@ -113,23 +113,23 @@ def test_step_aabb_size_mismatch():
 
 
 def test_obs_dim():
-    """obs_dim = N_movable * 8 + N_movable + 4。"""
+    """观测空间为 Dict：component_slots (MAX_MOVABLE,8) + global_features (8,)。"""
     env = create_patched_env()
-    expected = env.N_movable * 8 + env.N_movable + 4
-    assert env.observation_space.shape[0] == expected
+    spaces = env.observation_space.spaces
+    assert spaces["component_slots"].shape == (Config.MAX_MOVABLE, 8)
+    assert spaces["global_features"].shape == (8,)
 
 
 def test_obs_pending_initial():
-    """reset 后 pending 观测全零。"""
+    """reset 后 pending 观测全零（Dict 观测）。"""
     env = create_patched_env()
     env.reset()
     obs = env._get_obs_with_pending(0)
-    assert obs.shape == (env.observation_space.shape[0],)
-    # pending_comp 部分全零
-    n_movable = env.N_movable
-    base_obs_len = n_movable * 8
-    pending_comp = obs[base_obs_len:base_obs_len + n_movable]
-    assert pending_comp.sum() == 0.0
+    assert set(obs.keys()) == {"component_slots", "global_features"}
+    slots = obs["component_slots"]
+    assert slots.shape == (Config.MAX_MOVABLE, 8)
+    # reset 后无已放置元件 → placed_flag 列（第 0 列）全零
+    assert slots[:, 0].sum() == 0.0
 
 
 def test_obs_after_step():
@@ -156,23 +156,31 @@ def test_mask_step0_all_available():
 
 
 def test_mask_step1_grid_bounds():
-    """step 1 返回 (GRID_W,) 越界 mask，grid_x < grid_width 才合法。"""
+    """step 1 返回 (GRID_W,) 越界 mask，grid_x < min(grid_width, GRID_W) 才合法。
+
+    GRID_W 是统一网格上限（真实训练板覆盖均 ≤ 此值）；当测试用合成板覆盖
+    超过该上限时，掩码全为合法，仍应在 cap 处正确截断。
+    """
     env = create_patched_env()
     mask = env._build_mask_for_step(1)
     assert mask is not None
     assert mask.shape == (Config.GRID_W,), f"Expected ({Config.GRID_W},), got {mask.shape}"
-    assert mask.sum() == env.grid_width  # 只有板内坐标合法
-    assert not mask[env.grid_width:].any()  # 越界坐标全 False
+    cap = min(env.grid_width, Config.GRID_W)
+    assert mask.sum() == cap                       # 仅板内（且在统一上限内）坐标合法
+    assert mask[:cap].all()                        # cap 以内全合法
+    assert not mask[cap:].any()                    # 超出 cap 的坐标全 False
 
 
 def test_mask_step2_grid_bounds():
-    """step 2 返回 (GRID_H,) 越界 mask，grid_y < grid_height 才合法。"""
+    """step 2 返回 (GRID_H,) 越界 mask，grid_y < min(grid_height, GRID_H) 才合法。"""
     env = create_patched_env()
     mask = env._build_mask_for_step(2)
     assert mask is not None
     assert mask.shape == (Config.GRID_H,), f"Expected ({Config.GRID_H},), got {mask.shape}"
-    assert mask.sum() == env.grid_height  # 只有板内坐标合法
-    assert not mask[env.grid_height:].any()  # 越界坐标全 False
+    cap = min(env.grid_height, Config.GRID_H)
+    assert mask.sum() == cap
+    assert mask[:cap].all()
+    assert not mask[cap:].any()
 
 
 # ==================== reward ====================
@@ -208,6 +216,51 @@ def test_reward_nonzero_for_valid_placement():
     )
     if info["placed_count"] > 0:
         assert reward != 0.0, "Valid placement should produce non-zero reward"
+
+
+def test_quality_reward_zero_on_violation():
+    """has_violations=True（硬重叠）时，品质项全为 0，reward 只含惩罚。
+
+    这是 reward 虚高 bug 的回归测试：此前品质项（net聚合/拥塞/去耦/大元件）
+    在放置失败时仍发放，导致 agent 反复失败刷分、episode reward 虚高到
+    250~1000+（远超完美布局理论上限 ~158）。
+    """
+    env = create_patched_env()
+    env.reset()
+    comp = env.movable_list[0]
+
+    # 构造失败放置：硬重叠面积 100mm²，无软间距、无出界
+    hard, soft, oob, keepout = 100.0, 0.0, 0.0, False
+    reward = env._calculate_reward(comp, hard, soft, oob, True, quality_scale=1.0)
+    bd = env._last_reward_breakdown
+
+    # 品质项必须全为 0
+    assert bd["net_aggregation"] == 0.0
+    assert bd["congestion"] == 0.0
+    assert bd["decoupling"] == 0.0
+    assert bd["large_comp"] == 0.0
+    # 完成奖励也必须为 0（失败不放完成奖励）
+    assert "completion_partial" not in bd or bd["completion_partial"] == 0.0
+    # reward 只含硬重叠惩罚：-W_OVERLAP_HARD * hard
+    assert reward == -Config.W_OVERLAP_HARD * hard
+    assert reward <= 0.0
+
+
+def test_quality_reward_nonzero_on_valid():
+    """has_violations=False（合法放置）时，品质项正常发放，reward > 0。"""
+    env = create_patched_env()
+    env.reset()
+    comp = env.movable_list[0]
+
+    # 合法放置：无任何违规
+    hard, soft, oob, keepout = 0.0, 0.0, 0.0, False
+    reward = env._calculate_reward(comp, hard, soft, oob, False, quality_scale=1.0)
+    bd = env._last_reward_breakdown
+
+    # 完成奖励一定发放（W_COMPLETION / N_movable）
+    assert bd["completion_partial"] > 0.0
+    # 总 reward 为正（完成奖励 + 品质项 - 零惩罚）
+    assert reward > 0.0
 
 
 # ==================== assemble_action ====================
@@ -381,9 +434,11 @@ def test_config_load_from_file_inline_comments():
 
 
 def test_config_spacing_threshold():
-    """spacing_threshold_for 返回两个封装类型间距阈值的 max。"""
-    thresholds = [0.2, 1.25, 2.5, 5.0, 2.0]
+    """spacing_threshold_for 返回两个封装类型间距阈值的 max。
+
+    颗粒度重构后统一为 0.2mm（CELL_SIZE=0.2、分类间距不再区分），
+    任意封装组合均返回 0.2。
+    """
     for i in range(5):
         for j in range(5):
-            expected = max(thresholds[i], thresholds[j])
-            assert Config.spacing_threshold_for(i, j) == expected
+            assert Config.spacing_threshold_for(i, j) == 0.2

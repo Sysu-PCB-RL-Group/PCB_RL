@@ -57,6 +57,16 @@ class DQNAgent:
         self.target_net.load_state_dict(self.q_net.state_dict())
         self.target_net.eval()
 
+        # 冻结的 BC 策略锚点（用于 BC 正则化，阻止 RL 把 BC 好策略学坏）
+        self.bc_net = DQN(n_movable=n_movable, grid_w=grid_w, grid_h=grid_h).to(device)
+        self.bc_net.eval()
+        self.bc_net_active: bool = False
+        self.bc_reg_lambda: float = float(getattr(Config, "BC_REG_LAMBDA", 0.0))
+        self.bc_reg_temp: float = float(getattr(Config, "BC_REG_TEMP", 1.0))
+        self.bc_reg_value_lambda: float = float(getattr(Config, "BC_REG_VALUE_LAMBDA", 0.0))
+        self.last_bc_reg: float = 0.0
+        self.last_bc_val: float = 0.0
+
         # 优化器
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.loss_fn = nn.MSELoss()
@@ -231,6 +241,22 @@ class DQNAgent:
         else:
             loss = element_loss.mean()
 
+        # BC 正则化：同时锚定策略分布(KL)与 Q 值幅度(L2)到冻结 BC，阻止 Q 值发散
+        if (self.bc_reg_lambda > 0 or self.bc_reg_value_lambda > 0) and self.bc_net_active:
+            kl_reg, val_reg = self._bc_regularization(obs_tensor, step_ids)
+            self.last_bc_reg = kl_reg.item()
+            self.last_bc_val = val_reg.item()
+            loss = loss + self.bc_reg_lambda * kl_reg + self.bc_reg_value_lambda * val_reg
+            if self.train_steps % 200 == 0 or self.train_steps < 5:
+                logger.info(
+                    f"[BC-REG] step={self.train_steps} kl={self.last_bc_reg:.4f} "
+                    f"val={self.last_bc_val:.3f} λkl={self.bc_reg_lambda} λval={self.bc_reg_value_lambda} "
+                    f"eff_kl={self.bc_reg_lambda * self.last_bc_reg:.3f} eff_val={self.bc_reg_value_lambda * self.last_bc_val:.3f}"
+                )
+        else:
+            self.last_bc_reg = 0.0
+            self.last_bc_val = 0.0
+
         # 反向传播
         self.optimizer.zero_grad()
         loss.backward()
@@ -242,6 +268,79 @@ class DQNAgent:
         # 逐样本 TD-error（供 PER 优先级更新）
         td_errors = (target - q_vals).detach().cpu().numpy().flatten()
         return loss.item(), td_errors
+
+    def init_bc_anchor(self):
+        """用当前 Q 网络（BC 预训练后权重）初始化冻结 BC 策略锚点，供 RL 阶段正则化。"""
+        self.bc_net.load_state_dict(self.q_net.state_dict())
+        self.bc_net.eval()
+        self.bc_net_active = True
+        logger.info(
+            f"BC anchor initialized for regularization "
+            f"(λ={self.bc_reg_lambda}, τ={self.bc_reg_temp})"
+        )
+
+    def _bc_regularization(self, obs_tensor: dict, step_ids: np.ndarray):
+        """BC 正则化：同时返回 (策略 KL, 值 L2) 两项，均相对冻结 BC 策略。
+
+        - 策略 KL：当前策略分布 ‖ BC 策略分布（仅合法动作空间），锚定动作选择。
+        - 值 L2：MSE(Q_当前, Q_BC)（掩码后，仅合法动作），锚定 Q 值幅度，防 Q 值发散。
+        两者均在 batch 与该 batch 出现的 head 上平均。
+        """
+        total_kl = torch.tensor(0.0, device=self.device)
+        total_vm = torch.tensor(0.0, device=self.device)
+        total_n = 0
+        tau = self.bc_reg_temp
+        for sid in range(5):
+            step_idx = (step_ids == sid)
+            if not step_idx.any():
+                continue
+            idx = torch.tensor(step_idx, dtype=torch.bool, device=self.device)
+            sub_obs = {
+                "component_slots": obs_tensor["component_slots"][idx],
+                "global_features": obs_tensor["global_features"][idx],
+            }
+            cur_q = self.q_net(sub_obs, sid)
+            with torch.no_grad():
+                bc_q = self.bc_net(sub_obs, sid)  # (n, K_sid)
+
+            # 合法动作掩码（与 TD 目标端对称）
+            if sid == 0:
+                placed_flags = sub_obs["component_slots"][:, :, 0]
+                legal = (placed_flags < 0.5).to(self.device)
+            elif sid == 1:
+                grid_w = (sub_obs["global_features"][:, 0] * Config.GRID_W).round().long()
+                legal = torch.arange(Config.GRID_W, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
+            elif sid == 2:
+                grid_h = (sub_obs["global_features"][:, 1] * Config.GRID_H).round().long()
+                legal = torch.arange(Config.GRID_H, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
+            else:
+                legal = torch.ones_like(cur_q, dtype=torch.bool)
+
+            cur_qm = cur_q.clone(); bc_qm = bc_q.clone()
+            # 值 L2 用：非法动作对齐为 0（差值=0，不产生 NaN）
+            cur_qv = cur_q.clone(); bc_qv = bc_q.clone()
+            cur_qv[~legal] = 0.0; bc_qv[~legal] = 0.0
+            # KL 用：非法动作置 -inf 后再 softmax
+            cur_qm[~legal] = float('-inf'); bc_qm[~legal] = float('-inf')
+            # 防御：整行全非法（理论上不会发生）→ 置 0，避免 softmax NaN
+            all_masked = (~legal).all(dim=-1)
+            if all_masked.any():
+                cur_qm[all_masked] = 0.0; bc_qm[all_masked] = 0.0
+                cur_qv[all_masked] = 0.0; bc_qv[all_masked] = 0.0
+
+            # 策略 KL
+            cur_p = torch.nn.functional.softmax(cur_qm / tau, dim=-1)
+            bc_p = torch.nn.functional.softmax(bc_qm / tau, dim=-1)
+            kl = (cur_p * (cur_p.clamp_min(1e-8).log() - bc_p.clamp_min(1e-8).log())).sum(dim=-1)
+            total_kl += kl.sum()
+
+            # 值 L2（非法已对齐为 0，差值=0，无 NaN）
+            vm = ((cur_qv - bc_qv) ** 2).mean()
+            total_vm += vm
+
+            total_n += int(kl.numel())
+        scale = max(total_n, 1)
+        return total_kl / scale, total_vm / scale
 
     def learn_bc(self, expert_transitions: List[Tuple], batch_size: int = 64,
                  epochs: int = 50, verbose: bool = True) -> List[float]:

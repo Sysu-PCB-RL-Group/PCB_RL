@@ -201,5 +201,5 @@ pytest tests/
 | EXPERT_TRAJECTORIES_PER_BOARD | 20 | 每板生成专家轨迹数 |
 | EXPERT_EPSILON_DECOMPOSE | 0.5 | 拆解随机化概率 |
 | EXPERT_BC_EPOCHS | 50 | BC 预训练 epoch 数 |
-| EXPERT_BUFFER_RATIO | 0.2 | Phase 2 buffer 专家占比 |
+| EXPERT_BUFFER_RATIO | 0.7 | Phase 2 buffer 专家占比（每 batch 采样占比） |
 | PER_ALPHA | 0.6 | 优先级指数 |

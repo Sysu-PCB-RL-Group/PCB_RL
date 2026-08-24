@@ -57,15 +57,15 @@ class Config:
     # 几何阈值
     BOARD_MARGIN: float = 1.0
     DECOUPLING_MAX_DIST: float = 5.0
-    CELL_SIZE: float = 1.0
+    CELL_SIZE: float = 0.2       # 网格离散化单位（0.2mm/格，细化 5 倍以表达真实 0.24~0.48mm 间距）
     CONGESTION_CELL_SIZE: float = 2.0
 
     # 固定维度上限（支持不同 PCB 使用同一网络）
-    # 当前针对开关小板（6 元件, 7×7 grid），设为实际值的 2 倍
+    # 统一维度 100×100：罩住全 5 块板在 0.2mm 下的最大覆盖率（约 80×80），预留余量
     # 切换到大板时需恢复: MAX_MOVABLE=384, GRID_W=512, GRID_H=512
-    MAX_MOVABLE: int = 18        # 最大可移动元件数 (6 × 20)
-    GRID_W: int = 21             # 最大网格宽度 (7 × 20)
-    GRID_H: int = 21             # 最大网格高度 (7 × 20)
+    MAX_MOVABLE: int = 18        # 最大可移动元件数
+    GRID_W: int = 100            # 最大网格宽度（统一维度上限；掩码/网络 head 输出均读此值）
+    GRID_H: int = 100            # 最大网格高度（统一维度上限；掩码/网络 head 输出均读此值）
 
     # 观测归一化开关（默认关闭以兼容已有 checkpoint）
     # 开启后坐标除以 board_diagonal，rotation 除以 4.0，
@@ -73,15 +73,19 @@ class Config:
     NORMALIZE_OBS: bool = False
 
     # ---- 专家轨迹注入 ----
-    EXPERT_TRAJECTORIES_PER_BOARD: int = 20
-    EXPERT_EPSILON_DECOMPOSE: float = 0.2
+    EXPERT_TOTAL_TRANSITIONS: int = 20000   # 目标专家 transition 总数（达到即停）
+    EXPERT_MAX_TRAJECTORIES: int = 5000     # 最大轨迹数安全上限（防死循环）
+    EXPERT_EPSILON_DECOMPOSE: float = 0.5
     EXPERT_POS_NOISE_PROB: float = 0.2
     EXPERT_ROT_NOISE_PROB: float = 0.1
     EXPERT_BC_EPOCHS: int = 50
-    EXPERT_BUFFER_RATIO: float = 0.2
+    EXPERT_BUFFER_RATIO: float = 0.7
     EXPERT_BUFFER_MULTIPLIER: int = 5
     PER_ALPHA: float = 0.6
     PER_BETA_START: float = 0.4
+    BC_REG_LAMBDA: float = 10.0   # BC 正则化强度：RL loss += λ·KL(当前策略‖冻结BC策略)，锚定好策略防学坏
+    BC_REG_TEMP: float = 1.0      # BC 正则化 softmax 温度（策略蒸馏温度）
+    BC_REG_VALUE_LAMBDA: float = 0.5  # BC 值正则化强度：RL loss += λv·MSE(Q当前, Q_BC)，锚定 Q 值幅度防发散
     EXPERT_TRANSITIONS_DIR: str = "data/expert_transitions"
 
     @classmethod
@@ -158,7 +162,9 @@ class Config:
         Returns:
             两元件间距阈值 (mm)，取两者阈值之 max
         """
-        thresholds = [0.2, 1.25, 2.5, 5.0, 2.0]
+        # 统一软间距阈值 0.2mm（颗粒度 CELL_SIZE=0.2mm 下，覆盖真实元件间距 0.24~0.48mm，
+        # 确保完美布局不因阈值过严而恒为负分；分类间距差异在现阶段 5 块板范围内不做区分）
+        thresholds = [0.2, 0.2, 0.2, 0.2, 0.2]
         return max(thresholds[type_a], thresholds[type_b])
 
 
@@ -179,12 +185,20 @@ class PCBLayoutEnv(gym.Env):
         """
         super().__init__()
 
-        # 加载配置
-        if config_path:
-            Config.load_from_file(config_path)
+        import os as _os
+
+        # 加载训练超参（argument.txt），保证 reward 口径与训练一致。
+        # config_path 未指定时默认加载项目 config/argument.txt，与 admin.txt
+        # 对称，避免直接实例化 env（如命令行生成专家轨迹）时漏加载超参，
+        # 导致 W_COMPLETION 等用类默认值（如 200）而非 argument.txt 的 100。
+        if config_path is None:
+            config_path = _os.path.join(
+                _os.path.dirname(_os.path.abspath(__file__)),
+                "..", "config", "argument.txt",
+            )
+        Config.load_from_file(config_path)
 
         # 加载固定维度参数（admin.txt）
-        import os as _os
         _dim_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "config", "admin.txt")
         Config.load_dims_from_file(_dim_path)
 
@@ -206,8 +220,10 @@ class PCBLayoutEnv(gym.Env):
         )
 
         # 网格离散化
-        self.grid_width = max(1, int((self.valid_area[2] - self.valid_area[0]) / Config.CELL_SIZE))
-        self.grid_height = max(1, int((self.valid_area[3] - self.valid_area[1]) / Config.CELL_SIZE))
+        # 用 round 而非 int 截断：0.2 无法精确用二进制浮点表示，7.2/0.2 会得到
+        # 35.9999...，int 截断丢最右一格（grid 从 36 变 35），round 修正此下溢。
+        self.grid_width = max(1, int(round((self.valid_area[2] - self.valid_area[0]) / Config.CELL_SIZE)))
+        self.grid_height = max(1, int(round((self.valid_area[3] - self.valid_area[1]) / Config.CELL_SIZE)))
 
         # 元件分类
         self.fixed_list = [c for c in self.kicad.components.values() if c.is_fixed]
@@ -696,74 +712,84 @@ class PCBLayoutEnv(gym.Env):
         breakdown["out_of_bounds"] = -penalty_oob
 
         # ========== 品质奖励（quality_scale 升温控制） ==========
+        # 品质项仅在合法放置（无违规）时发放：失败 step 只扣 hard/soft/oob 惩罚，
+        # 不给任何品质奖励。否则 agent 会通过反复"轻微失败"刷品质项（拥塞/大元件
+        # 等固定奖励）导致 episode reward 虚高（实测 baseline 刷到 250~1000+，
+        # 远超完美布局理论上限 ~158）。
 
-        # Net 聚合度
-        agg_reward = 0.0
-        for net_id in component.nets:
-            net = self.nets[net_id]
-            comp_bboxes = []
-            # net.connections 不去重（一个 footprint 多 pad 连同一 net 有多个条目），
-            # 需按 ref 去重，避免同一 footprint 的 bbox 被重复计入导致聚合度失真
-            seen_refs = set()
-            for conn_ref, _ in net.connections:
-                if conn_ref in self.kicad.components and conn_ref not in seen_refs:
-                    seen_refs.add(conn_ref)
-                    c = self.kicad.components[conn_ref]
-                    if c.is_placed:
-                        comp_bboxes.append(c.bbox)
-            # 当前元件刚放置，bbox 已更新但 is_placed 尚未置 True（step() 在 reward 计算后更新），
-            # 需显式计入，否则每个 net 少算一个元件，2 元件 net 永远拿不到聚合奖励
-            comp_bboxes.append(component.bbox)
-            if len(comp_bboxes) >= 2:
-                agg = PCBUtils.net_aggregation(comp_bboxes)
-                agg_score = max(0.0, 1.0 - agg / max(self.board_diagonal, 0.01))
-                agg_reward += agg_score * Config.W_NET_AGGREGATION
-        reward += agg_reward * quality_scale
-        breakdown["net_aggregation"] = agg_reward * quality_scale
-
-        # 拥塞均衡度：仅正常放置（无违规）计入当前元件，
-        # 违规元件位置无效，不应参与品质奖励计算
-        placed_comps = [self.kicad.components[rid] for rid in self.placed_list]
         if not has_violations:
+            # Net 聚合度
+            agg_reward = 0.0
+            for net_id in component.nets:
+                net = self.nets[net_id]
+                comp_bboxes = []
+                # net.connections 不去重（一个 footprint 多 pad 连同一 net 有多个条目），
+                # 需按 ref 去重，避免同一 footprint 的 bbox 被重复计入导致聚合度失真
+                seen_refs = set()
+                for conn_ref, _ in net.connections:
+                    if conn_ref in self.kicad.components and conn_ref not in seen_refs:
+                        seen_refs.add(conn_ref)
+                        c = self.kicad.components[conn_ref]
+                        if c.is_placed:
+                            comp_bboxes.append(c.bbox)
+                # 当前元件刚放置，bbox 已更新但 is_placed 尚未置 True（step() 在 reward 计算后更新），
+                # 需显式计入，否则每个 net 少算一个元件，2 元件 net 永远拿不到聚合奖励
+                comp_bboxes.append(component.bbox)
+                if len(comp_bboxes) >= 2:
+                    agg = PCBUtils.net_aggregation(comp_bboxes)
+                    agg_score = max(0.0, 1.0 - agg / max(self.board_diagonal, 0.01))
+                    agg_reward += agg_score * Config.W_NET_AGGREGATION
+            reward += agg_reward * quality_scale
+            breakdown["net_aggregation"] = agg_reward * quality_scale
+
+            # 拥塞均衡度：统计已放置元件 + 当前元件的 net 分布均匀度
+            placed_comps = [self.kicad.components[rid] for rid in self.placed_list]
             placed_comps.append(component)
-        cong_std = PCBUtils.congestion_std(
-            placed_comps, self.nets, self.valid_area,
-            Config.CONGESTION_CELL_SIZE
-        )
-        max_std = max(1.0, np.sqrt(self.N_movable))
-        cong_score = max(0.0, 1.0 - cong_std / max_std)
-        cong_reward = cong_score * Config.W_CONGESTION
-        reward += cong_reward * quality_scale
-        breakdown["congestion"] = cong_reward * quality_scale
+            cong_std = PCBUtils.congestion_std(
+                placed_comps, self.nets, self.valid_area,
+                Config.CONGESTION_CELL_SIZE
+            )
+            max_std = max(1.0, np.sqrt(self.N_movable))
+            cong_score = max(0.0, 1.0 - cong_std / max_std)
+            cong_reward = cong_score * Config.W_CONGESTION
+            reward += cong_reward * quality_scale
+            breakdown["congestion"] = cong_reward * quality_scale
 
-        # 去耦电容距离
-        decap_reward = 0.0
-        decap_violations = 0
-        if component.id in self.decoupling_map:
-            for cap_id in self.decoupling_map[component.id]:
-                if cap_id in self.kicad.components:
-                    cap = self.kicad.components[cap_id]
-                    if cap.is_placed:
-                        dist = PCBUtils.min_pin_to_cap_distance(component, cap)
-                        decap_reward += max(
-                            0.0, 1.0 - dist / Config.DECOUPLING_MAX_DIST
-                        ) * Config.W_DECOUPLING
-                        if dist > Config.DECOUPLING_MAX_DIST:
-                            decap_violations += 1
-        reward += decap_reward * quality_scale
-        breakdown["decoupling"] = decap_reward * quality_scale
-        breakdown["decoupling_violations"] = decap_violations
+            # 去耦电容距离
+            decap_reward = 0.0
+            decap_violations = 0
+            if component.id in self.decoupling_map:
+                for cap_id in self.decoupling_map[component.id]:
+                    if cap_id in self.kicad.components:
+                        cap = self.kicad.components[cap_id]
+                        if cap.is_placed:
+                            dist = PCBUtils.min_pin_to_cap_distance(component, cap)
+                            decap_reward += max(
+                                0.0, 1.0 - dist / Config.DECOUPLING_MAX_DIST
+                            ) * Config.W_DECOUPLING
+                            if dist > Config.DECOUPLING_MAX_DIST:
+                                decap_violations += 1
+            reward += decap_reward * quality_scale
+            breakdown["decoupling"] = decap_reward * quality_scale
+            breakdown["decoupling_violations"] = decap_violations
 
-        # 大元件排名：面积因子 × 早放因子，鼓励"大元件越早放越好"
-        large_comp_reward = 0.0
-        if component.id in self.area_ranks:
-            rank = self.area_ranks[component.id]
-            size_factor = max(0.0, 1.0 - rank / self.N_movable)
-            # placement_step = len(placed_list)：当前元件是第几个被放置的（0-based）
-            order_factor = max(0.0, 1.0 - len(self.placed_list) / self.N_movable)
-            large_comp_reward = size_factor * order_factor * Config.W_LARGE_COMP
-        reward += large_comp_reward * quality_scale
-        breakdown["large_comp"] = large_comp_reward * quality_scale
+            # 大元件排名：面积因子 × 早放因子，鼓励"大元件越早放越好"
+            large_comp_reward = 0.0
+            if component.id in self.area_ranks:
+                rank = self.area_ranks[component.id]
+                size_factor = max(0.0, 1.0 - rank / self.N_movable)
+                # placement_step = len(placed_list)：当前元件是第几个被放置的（0-based）
+                order_factor = max(0.0, 1.0 - len(self.placed_list) / self.N_movable)
+                large_comp_reward = size_factor * order_factor * Config.W_LARGE_COMP
+            reward += large_comp_reward * quality_scale
+            breakdown["large_comp"] = large_comp_reward * quality_scale
+        else:
+            # 失败 step：品质项全部归零，仅记录到 breakdown 便于诊断
+            breakdown["net_aggregation"] = 0.0
+            breakdown["congestion"] = 0.0
+            breakdown["decoupling"] = 0.0
+            breakdown["decoupling_violations"] = 0
+            breakdown["large_comp"] = 0.0
 
         # ========== 完成奖励（始终生效） ==========
 
