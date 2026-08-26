@@ -18,13 +18,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from .pcb_layout_env import Config
+from env.pcb_layout_env import Config
+from env.pcb_utils import PCBUtils
 
 logger = logging.getLogger(__name__)
 
 # ===================== 默认超参数（可被 argument.txt 覆盖） =====================
 
-DEFAULT_TRAJECTORIES_PER_BOARD = 20
+DEFAULT_TOTAL_TRANSITIONS = 20000
+DEFAULT_MAX_TRAJECTORIES = 5000
 DEFAULT_EPSILON_DECOMPOSE = 0.5
 DEFAULT_POS_NOISE_PROB = 0.2
 DEFAULT_ROT_NOISE_PROB = 0.1
@@ -39,7 +41,8 @@ class ExpertTrajectoryGenerator:
     多条可用于 DQN 训练的自回归 5 步子步骤 transition 序列。
 
     Attributes:
-        trajectories_per_board: 每板生成轨迹数
+        total_transitions: 目标 transition 总数（生成直到达到即停）
+        max_trajectories: 最大轨迹数安全上限（防死循环）
         epsilon_decompose: 拆解随机化概率 ε
         pos_noise_prob: 位置变异概率
         rot_noise_prob: 旋转变异概率
@@ -47,35 +50,33 @@ class ExpertTrajectoryGenerator:
 
     def __init__(
         self,
-        trajectories_per_board: int = DEFAULT_TRAJECTORIES_PER_BOARD,
+        total_transitions: int = DEFAULT_TOTAL_TRANSITIONS,
+        max_trajectories: int = DEFAULT_MAX_TRAJECTORIES,
         epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
         pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
         rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
-        apply_penalties: bool = False,
     ):
         """初始化生成器。
 
         Args:
-            trajectories_per_board: 每板生成轨迹数
+            total_transitions: 目标 transition 总数（生成直到达到即停）
+            max_trajectories: 最大轨迹数安全上限（防死循环）
             epsilon_decompose: 拆解随机化概率（50% 随机选 / 50% 选最小面积）
-            pos_noise_prob: 位置变异概率（±1 格偏移）
-            rot_noise_prob: 旋转变异概率（±90°）
-            apply_penalties: 专家 reward 是否携带惩罚项。
-                False（默认）= 只算品质奖励，与当前跨板训练行为一致；
-                True = 与 RL 真实环境 reward 完全一致（含重叠/间距/出界惩罚），
-                用于验证「专家 reward 与 RL reward 尺度错配」假说。
+            pos_noise_prob: 位置变异概率（±1~2 格偏移）
+            rot_noise_prob: 旋转变异概率（全 4 种旋转）
         """
-        self.trajectories_per_board = trajectories_per_board
+        self.total_transitions = total_transitions
+        self.max_trajectories = max_trajectories
         self.epsilon_decompose = epsilon_decompose
         self.pos_noise_prob = pos_noise_prob
         self.rot_noise_prob = rot_noise_prob
-        self.apply_penalties = apply_penalties
 
     # ==================== 核心：反向拆解 ====================
 
     def decompose_backward(
         self,
         env,
+        shift: Tuple[float, float] = (0.0, 0.0),
     ) -> List[Tuple[str, dict]]:
         """从完整布局反向拆解，生成一条回溯链。
 
@@ -84,6 +85,8 @@ class ExpertTrajectoryGenerator:
 
         Args:
             env: 已加载 KiCad 源数据的 PCBLayoutEnv（元件全部 is_placed=True）
+            shift: 整体平移偏移 (dx, dy) mm，在 reset 后对所有 movable 元件
+                bbox 平移，用于生成几何等价布局（调用方保证平移后不越界）。
 
         Returns:
             回溯链列表 [(comp_id, snapshot), ...]，按拆解顺序排列。
@@ -93,6 +96,12 @@ class ExpertTrajectoryGenerator:
         """
         # 初始状态：所有 movable 元件均已放置
         env.reset()
+        # 几何平移：必须在 reset（restore_initial_state）之后应用，否则被冲掉
+        if shift != (0.0, 0.0):
+            dx, dy = shift
+            for comp in env.movable_list:
+                x1, y1, x2, y2 = comp.bbox
+                comp.bbox = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
         for comp in env.movable_list:
             comp.is_placed = True
         env.placed_list = [c.id for c in env.movable_list]
@@ -142,16 +151,14 @@ class ExpertTrajectoryGenerator:
         snapshot: dict,
         env,
     ) -> dict:
-        """对元件状态施加微量变异，变异后校验违规并回退到原始干净状态。
+        """对元件状态施加微量变异，变异后做合法性检查（越界/重叠则回退）。
 
-        20% 概率位置 ±1 格偏移，10% 概率 rotation ±90°，70% 概率严格继承。
-        层数始终严格继承。
+        20% 概率位置 ±1~2 格偏移，10% 概率旋转变为其它 3 种之一，
+        其余情况严格继承。层数始终严格继承。
 
-        变异后执行与 env.step() 完全相同的约束检测（硬重叠 + 软间距 + 出界 +
-        禁止区域）。一旦变异导致任何违规，立即回退到变异前的原始状态，
-        保证专家示范 transition 的 reward 恒为"零惩罚的正向品质分"：
-        专家源布局是干净的，变异是用于增加轨迹多样性的"探索"，而不是
-        引入违规示范污染 Phase 2 的 TD 学习。
+        变异后的位置若越出 valid_area、或与 snapshot 中其它已放置元件
+        发生 AABB 硬重叠，则放弃本次变异、回退到原始状态，保证专家
+        轨迹绝不包含非法布局。
 
         Args:
             comp_id: 元件 ID
@@ -159,25 +166,20 @@ class ExpertTrajectoryGenerator:
             env: PCBLayoutEnv 实例（用于获取 valid_area 边界）
 
         Returns:
-            变异后（或回退后）的元件状态 dict {bbox, rotation, layer}
-            （仅包含位置/旋转/层字段）
+            变异后的元件状态 dict {bbox, rotation, layer}（仅包含位置/旋转/层字段）
         """
         comp_state = snapshot[comp_id]
         bbox = list(comp_state["bbox"])  # [x1, y1, x2, y2]
         rotation = comp_state["rotation"]
         layer = comp_state["layer"]
 
-        # 记录原始干净状态，作为变异违规时的回退目标
-        original_bbox = tuple(bbox)
-        original_rotation = rotation
-
         # 层数始终严格继承，不变异
 
-        # 位置变异：20% 概率 ±1 格
+        # 位置变异：20% 概率 ±1~2 格（x 或 y 单方向）
         if random.random() < self.pos_noise_prob:
-            cell_size = Config.CELL_SIZE  # 跟随 Config.CELL_SIZE
+            cell_size = Config.CELL_SIZE
             direction = random.choice(["x", "y"])
-            offset = random.choice([-1, 1]) * cell_size
+            offset = random.choice([-2, -1, 1, 2]) * cell_size
 
             if direction == "x":
                 bbox[0] += offset
@@ -186,100 +188,84 @@ class ExpertTrajectoryGenerator:
                 bbox[1] += offset
                 bbox[3] += offset
 
-            # Clamp 到 valid_area 内
-            va_xmin, va_ymin, va_xmax, va_ymax = env.valid_area
-            w = bbox[2] - bbox[0]
-            h = bbox[3] - bbox[1]
-            bbox[0] = max(va_xmin, min(bbox[0], va_xmax - w))
-            bbox[1] = max(va_ymin, min(bbox[1], va_ymax - h))
-            bbox[2] = bbox[0] + w
-            bbox[3] = bbox[1] + h
-
-        # 旋转变异：10% 概率 ±90°
+        # 旋转变异：10% 概率变为其它 3 种旋转之一（覆盖全 4 种旋转）
         if random.random() < self.rot_noise_prob:
-            delta = random.choice([-1, 1])
-            rotation = (rotation + delta) % 4
+            rotation = random.choice([r for r in range(4) if r != rotation])
 
-        # ========== 变异后约束校验：新增硬违规则回退到原始状态 ==========
-        # 变异可能把专家示范推到重叠/出界位置；若不校验，这些"脏示范"会教坏
-        # BC 模仿（学到错误目标位置）。但校验要克制：
-        #   1) 只拦截"硬违规"（硬重叠/出界/禁止区域）——专家 reward 已去掉惩罚项，
-        #      软间距在专家示范中不再扣分，拦截软间距只会白白损失轨迹多样性；
-        #   2) 与变异前状态"相对比较"——原始布局本身轻微违规（如元件贴板边）
-        #      时，不应把全部变异都拒绝，否则轨迹退化为单一专家示范。
-        # 判定标准与 env._check_constraints 完全一致（含层区分）。
-        if self._has_new_hard_violations(
-            env, comp_id,
-            tuple(bbox), rotation, layer,
-            original_bbox, original_rotation, layer,
-        ):
-            bbox = list(original_bbox)
-            rotation = original_rotation
+        # 合法性检查：越界或硬重叠则回退到原始状态
+        mutated_bbox = tuple(bbox)
+        if not self._is_legal_placement(mutated_bbox, comp_id, snapshot, env.valid_area, env=env):
+            return {
+                "bbox": tuple(comp_state["bbox"]),
+                "rotation": comp_state["rotation"],
+                "layer": layer,
+            }
 
         return {
-            "bbox": tuple(bbox),
+            "bbox": mutated_bbox,
             "rotation": rotation,
             "layer": layer,
         }
 
-    def _has_new_hard_violations(
-        self,
-        env,
+    @staticmethod
+    def _is_legal_placement(
+        bbox: Tuple[float, float, float, float],
         comp_id: str,
-        new_bbox: Tuple[float, float, float, float],
-        new_rotation: int,
-        new_layer: int,
-        orig_bbox: Tuple[float, float, float, float],
-        orig_rotation: int,
-        orig_layer: int,
+        snapshot: dict,
+        valid_area: Tuple[float, float, float, float],
+        env=None,
     ) -> bool:
-        """检测变异后状态是否比变异前新增了硬违规（硬重叠/出界/禁止区域）。
+        """检查 bbox 是否合法：不越界、且与快照中其它全部元件无硬重叠。
 
-        硬违规评分 = 硬重叠面积 + 出界面积 + 禁止区域（极大值）。软间距不计入：
-        专家 reward 已去掉惩罚项，软间距在示范中无害，不应触发回退。
+        复用 PCBUtils.bbox_overlap_penalty（与 env._detect_collisions 同一套
+        碰撞判定）。**全局检查**：遍历 snapshot 中所有元件（含尚未放置者），
+        只要与任一其它元件发生硬重叠（hard > 0）即视为非法并回退。
 
-        采用"相对比较"：只有变异后硬违规严格大于变异前才返回 True（回退）。
-        原始布局本身轻微违规（如紧凑板卡元件贴板边）时，变异被保留，
-        保证专家轨迹多样性，避免退化为单一示范。
+        为什么是全局而非仅"已放置"：正向逐件放置时，先放置的元件只会被
+        检查 vs 已放置邻居，若变异后侵入"稍后才放置"元件的空间则漏检，
+        导致后续元件 reward 为负（with_expert 组崩坏的根因之一）。改为全局
+        检查后，任何方向的重叠都会被最先移动的元件在自身放置时就拦截并回退，
+        保证最终布局零硬重叠。
+
+        只拦截硬重叠（对应 has_violations 的判定），**不拦截软间距**：
+        软间距仅产生轻微 reward 惩罚、不构成违规；且量化后完美布局在
+        0.2mm 边界可能出现软间距，若一并拦截会导致 base 回退失败（无法放置）。
 
         Args:
-            env: PCBLayoutEnv 实例
-            comp_id: 元件 ID（在 env.movable_list 中查找）
-            new_bbox/new_rotation/new_layer: 变异后的目标状态
-            orig_bbox/orig_rotation/orig_layer: 变异前的原始状态
+            bbox: 待检查的 AABB (x1, y1, x2, y2)
+            comp_id: 当前元件 ID（检查时跳过自身）
+            snapshot: 完整布局快照 {comp_id: {bbox, is_placed, package_type, ...}}
+            valid_area: 板框有效区域 (x_min, y_min, x_max, y_max)
+            env: 可选 PCBLayoutEnv，用于 keepout 检查
 
         Returns:
-            True 表示变异后新增了硬违规（应回退到原始状态）
+            True 表示合法（可接受该变异），False 表示越界或硬重叠
         """
-        comp = None
-        for c in env.movable_list:
-            if c.id == comp_id:
-                comp = c
-                break
-        if comp is None:
-            return True
+        x1, y1, x2, y2 = bbox
+        va_xmin, va_ymin, va_xmax, va_ymax = valid_area
+        if x1 < va_xmin or y1 < va_ymin or x2 > va_xmax or y2 > va_ymax:
+            return False
 
-        saved_state = (
-            comp.bbox, comp.rotation, comp.layer,
-            comp.is_placed, list(env.placed_list),
-        )
-        try:
-            def hard_score(b, rot, lay):
-                comp.bbox = b
-                comp.rotation = rot
-                comp.layer = lay
-                comp.is_placed = False
-                (total_hard_overlap, _total_soft_spacing,
-                 total_out_of_bounds, in_keepout) = env._check_constraints(comp)
-                return (
-                    total_hard_overlap + total_out_of_bounds
-                    + (1e9 if in_keepout else 0.0)
-                )
-            old_score = hard_score(orig_bbox, orig_rotation, orig_layer)
-            new_score = hard_score(new_bbox, new_rotation, new_layer)
-            return new_score > old_score + 1e-9
-        finally:
-            comp.bbox, comp.rotation, comp.layer, comp.is_placed, env.placed_list = saved_state
+        # keepout 检查（可选，板框内缩禁止区域）
+        keepout_zones = getattr(env, "keepout_zones", None) if env is not None else None
+        if keepout_zones:
+            if PCBUtils.check_keepout(bbox, keepout_zones):
+                return False
+
+        self_pkg = snapshot[comp_id].get("package_type", 0)
+
+        # 全局检查：遍历所有元件（含尚未放置者），跳过自身
+        for other_id, other_state in snapshot.items():
+            if other_id == comp_id:
+                continue
+            other_bbox = other_state["bbox"]
+            other_pkg = other_state.get("package_type", 0)
+            threshold = Config.spacing_threshold_for(self_pkg, other_pkg)
+            hard, soft = PCBUtils.bbox_overlap_penalty(bbox, other_bbox, threshold)
+            # 只拦截硬重叠（has_violations 依据）；软间距不在此拦截
+            if hard > 0.0:
+                return False
+        return True
 
     # ==================== 轨迹 → Transition 转换 ====================
 
@@ -311,6 +297,32 @@ class ExpertTrajectoryGenerator:
             comp.is_placed = False
         env.placed_list = []
 
+        # 构建"实际布局快照"：记录每个元件的实际（变异后）状态。
+        # 初始 bbox 取 target_snapshot 里的平移后原始布局；movable 元件
+        # is_placed=False、fixed 元件恒 True。每放置一个元件，更新其 bbox
+        # 为变异后值并置 is_placed=True，使后续元件的变异检查基于"已放置
+        # 元件的实际位置"而非原始布局，避免多个元件同时变异后互相靠得过近。
+        # 关键：movable 元件 bbox 必须量化对齐到网格——reward 计算与 next_obs
+        # 都用网格量化坐标，若快照存连续坐标，后续 _is_legal_placement 复查
+        # 和 _detect_collisions 会因 ±0.1mm 量化误差在软间距阈值边界翻转违规
+        # 判定，产生"reward≈1~4"的坏专家样本。fixed 元件保持原坐标（真实位置）。
+        actual_snapshot = {}
+        if forward_order:
+            first_snap = forward_order[0][1]
+            for comp_id, comp_state in first_snap.items():
+                is_fixed = comp_state.get("is_fixed", False)
+                bbox = comp_state["bbox"]
+                if not is_fixed:
+                    _, _, bbox = self._quantize_bbox_to_grid(env, bbox)
+                actual_snapshot[comp_id] = {
+                    "bbox": bbox,
+                    "rotation": comp_state["rotation"],
+                    "layer": comp_state["layer"],
+                    "is_fixed": is_fixed,
+                    "is_placed": comp_state.get("is_fixed", False),
+                    "package_type": comp_state.get("package_type", 0),
+                }
+
         for step_idx, (comp_id, target_snapshot) in enumerate(forward_order):
             # 找到该元件在 movable_list 中的索引
             comp_idx = None
@@ -326,19 +338,32 @@ class ExpertTrajectoryGenerator:
             target_bbox = comp_target["bbox"]
             target_rotation = comp_target["rotation"]
             target_layer = comp_target["layer"]
+            # 记录无变异基准（用于量化后违规回退）
+            base_bbox = comp_target["bbox"]
+            base_rotation = comp_target["rotation"]
 
-            # 施加微量变异
-            mutated = self._mutate_component_state(comp_id, target_snapshot, env)
+            # 施加微量变异（检查 vs 已放置元件的实际变异后位置）
+            mutated = self._mutate_component_state(comp_id, actual_snapshot, env)
             target_bbox = mutated["bbox"]
             target_rotation = mutated["rotation"]
             target_layer = mutated["layer"]
 
-            # 计算网格坐标
-            gx1 = int(round((target_bbox[0] - env.valid_area[0]) / Config.CELL_SIZE))
-            gy1 = int(round((target_bbox[1] - env.valid_area[1]) / Config.CELL_SIZE))
-            # clamp 到网格范围
-            gx1 = max(0, min(gx1, env.grid_width - 1))
-            gy1 = max(0, min(gy1, env.grid_height - 1))
+            # 关键修复：变异产生连续坐标 bbox，而 reward/next_obs 用量化坐标。
+            # 必须把目标 bbox 量化对齐到网格，否则 ±0.1mm 量化误差会在软间距
+            # 阈值 0.2 边界翻转违规判定，产生 reward≈1~4 的坏专家样本。
+            gx1, gy1, quantized_bbox = self._quantize_bbox_to_grid(env, target_bbox)
+
+            # 量化后复查合法性：量化可能使间距 < 软间距阈值（连续坐标下恰好合法、
+            # 量化后翻转），此时回退到无变异基准位置的量化坐标，保证专家轨迹合法。
+            if not self._is_legal_placement(
+                quantized_bbox, comp_id, actual_snapshot, env.valid_area, env=env
+            ):
+                gx1, gy1, quantized_bbox = self._quantize_bbox_to_grid(env, base_bbox)
+                target_rotation = base_rotation
+                target_layer = comp_target["layer"]
+
+            # 全程统一使用量化坐标
+            target_bbox = quantized_bbox
 
             # 专家动作序列（5 步子步骤）
             expert_actions = [
@@ -356,13 +381,19 @@ class ExpertTrajectoryGenerator:
 
             transitions.extend(step_transitions)
 
-            # 更新环境状态：放置该元件
+            # 更新环境状态：放置该元件（量化坐标，与 reward/next_obs 一致）
             comp = env.movable_list[comp_idx]
             comp.bbox = target_bbox
             comp.rotation = target_rotation
             comp.layer = target_layer
             comp.is_placed = True
             env.placed_list.append(comp.id)
+
+            # 同步更新实际布局快照（供后续元件的变异检查使用）
+            actual_snapshot[comp_id]["bbox"] = target_bbox
+            actual_snapshot[comp_id]["rotation"] = target_rotation
+            actual_snapshot[comp_id]["layer"] = target_layer
+            actual_snapshot[comp_id]["is_placed"] = True
 
         return transitions
 
@@ -422,9 +453,8 @@ class ExpertTrajectoryGenerator:
         is_last_placement = (len(env.placed_list) + 1 == env.N_movable)
         done = is_last_placement
 
-        # 计算专家 reward（与真实环境 reward 标准完全一致：
-        # 临时放置到目标状态 → 约束检测 → env._calculate_reward(quality_scale=1.0)）
-        expert_reward = self._compute_expert_reward(env, comp_idx, expert_actions, placement_step)
+        # 计算专家 reward（复用环境完整 reward，含品质项，标准与训练一致）
+        expert_reward = self._compute_expert_reward(env, comp_idx, expert_actions)
 
         # 按 share_weights 分配到各子步骤
         share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]
@@ -472,65 +502,50 @@ class ExpertTrajectoryGenerator:
 
         return transitions
 
-    def _compute_expert_reward(
-        self, env, comp_idx: int, expert_actions: List[int], placement_step: int
-    ) -> float:
-        """计算专家放置的 reward（品质奖励与真实环境同尺度，但不含惩罚项）。
+    def _compute_expert_reward(self, env, comp_idx: int, expert_actions: List[int]) -> float:
+        """计算专家放置的完整 reward（与训练环境 _calculate_reward 完全一致）。
 
-        临时将元件设置到目标状态，执行与 env.step() 相同的约束检测，
-        再调用 env._calculate_reward() 计算 reward（quality_scale 固定 1.0，
-        apply_penalties=False）：
-        专家示范是"应该被模仿的正确行为"，不携带惩罚项。即使真实布局与
-        环境阈值（valid_area / 间距）存在轻微偏差，也不以负 reward 惩罚示范，
-        否则 Phase 2 TD 学习会被"照专家做回报为负"的坏信号带偏。
-        品质奖励（Net 聚合度/拥塞/去耦/大元件排名）与真实环境完全同尺度，
-        保证专家 transition 的 reward 与 RL 后期真实环境 reward 量级对齐。
+        专家轨迹代表理想最终布局，因此 quality_scale 强制为 1.0（品质项完全
+        生效），复用 env._detect_collisions + env._calculate_reward，保证专家
+        注入的 reward 标签与训练 reward 标准同步（含品质项，而非仅完成奖励）。
 
         Args:
             env: PCBLayoutEnv 实例
-            comp_idx: 元件在 env.movable_list 中的索引
+            comp_idx: 元件在 movable_list 中的索引
             expert_actions: [comp_idx, gx1, gy1, rotation, layer]
-            placement_step: 放置序号
 
         Returns:
-            与真实环境同标准的标量 reward
+            完整 reward 值
         """
         comp = env.movable_list[comp_idx]
-        saved_state = (
-            comp.bbox, comp.rotation, comp.layer,
-            comp.is_placed, list(env.placed_list),
-        )
+
+        # 保存当前元件状态，临时设为专家目标位置（与 _build_step_transitions
+        # 中 next_obs 的重建方式一致），保持 is_placed=False、不加入 placed_list，
+        # 与 env.step() 调用 _calculate_reward 时的状态约定一致。
+        saved = (comp.bbox, comp.rotation, comp.layer)
+        cell_size = Config.CELL_SIZE
+        x1 = env.valid_area[0] + expert_actions[1] * cell_size
+        y1 = env.valid_area[1] + expert_actions[2] * cell_size
+        comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
+        comp.rotation = expert_actions[3]
+        comp.layer = expert_actions[4]
 
         try:
-            # 用 grid 坐标 + 实际 footprint 重建目标 bbox（与 step 4 next_obs 构建一致）
-            cell_size = Config.CELL_SIZE
-            x1 = env.valid_area[0] + expert_actions[1] * cell_size
-            y1 = env.valid_area[1] + expert_actions[2] * cell_size
-            comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
-            comp.rotation = expert_actions[3]
-            comp.layer = expert_actions[4]
-            # 与 env.step() 计算 reward 时一致：is_placed 尚未置 True，不加入 placed_list
-            comp.is_placed = False
-
-            # 与 env.step() 相同的约束检测
-            (total_hard_overlap, total_soft_spacing,
-             total_out_of_bounds, in_keepout) = env._check_constraints(comp)
+            total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
+                env._detect_collisions(comp)
             has_violations = (
                 total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout
             )
-
-            # quality_scale=1.0：完整版品质奖励；apply_penalties 由实例控制：
-            # 默认 False（专家示范不携带惩罚项，见 _compute_expert_reward docstring），
-            # 可设为 True 使专家 reward 与 RL 真实环境完全一致（验证 reward 尺度错配假说）
-            reward = env._calculate_reward(
-                comp, total_hard_overlap, total_soft_spacing,
-                total_out_of_bounds, has_violations, quality_scale=1.0,
-                apply_penalties=self.apply_penalties,
+            return env._calculate_reward(
+                comp,
+                total_hard_overlap,
+                total_soft_spacing,
+                total_out_of_bounds,
+                has_violations,
+                quality_scale=1.0,
             )
         finally:
-            comp.bbox, comp.rotation, comp.layer, comp.is_placed, env.placed_list = saved_state
-
-        return reward
+            comp.bbox, comp.rotation, comp.layer = saved
 
     def _grid_to_bbox(
         self,
@@ -555,6 +570,42 @@ class ExpertTrajectoryGenerator:
         x2 = x1 + cell_size
         y2 = y1 + cell_size
         return (x1, y1, x2, y2)
+
+    def _quantize_bbox_to_grid(
+        self,
+        env,
+        bbox: Tuple[float, float, float, float],
+    ) -> Tuple[int, int, Tuple[float, float, float, float]]:
+        """将连续坐标 bbox 量化对齐到网格，返回量化后的网格坐标与 bbox。
+
+        关键修复：变异产生的 target_bbox 是连续坐标（含非网格对齐的小数位），
+        而 reward 计算（_compute_expert_reward）与 next_obs 重建（_build_step_transitions）
+        都用网格量化坐标（valid_area[0] + gx1*CELL_SIZE）。若不量化，连续 bbox
+        与量化 bbox 之间存在 ±0.1mm 误差，在软间距阈值 0.2 边界会翻转违规判定，
+        产生"reward≈1~4"的坏专家样本（污染专家注入、拖垮 with_expert 训练）。
+        本方法保证 env 状态与 reward/next_obs 全程使用同一套量化坐标。
+
+        Args:
+            env: PCBLayoutEnv 实例（含 valid_area、grid_width/grid_height）
+            bbox: 连续坐标 (x1, y1, x2, y2) AABB
+
+        Returns:
+            (gx1, gy1, quantized_bbox) 元组，其中 quantized_bbox 与
+            _compute_expert_reward 的坐标重建公式完全一致
+        """
+        cell_size = Config.CELL_SIZE
+        gx1 = int(round((bbox[0] - env.valid_area[0]) / cell_size))
+        gy1 = int(round((bbox[1] - env.valid_area[1]) / cell_size))
+        # clamp 到网格范围
+        gx1 = max(0, min(gx1, env.grid_width - 1))
+        gy1 = max(0, min(gy1, env.grid_height - 1))
+
+        x1 = env.valid_area[0] + gx1 * cell_size
+        y1 = env.valid_area[1] + gy1 * cell_size
+        # 保持 bbox 宽高不变（宽高 = footprint_w/h，与 reward 重建公式一致）
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        return (gx1, gy1, (x1, y1, x1 + w, y1 + h))
 
     def _copy_obs(self, obs: dict) -> dict:
         """深拷贝 dict 观测（component_slots 为 numpy array）。
@@ -602,39 +653,112 @@ class ExpertTrajectoryGenerator:
 
     # ==================== 批量生成 & 序列化 ====================
 
+    def _compute_layout_bounds(self, env) -> Tuple[float, float, float, float]:
+        """计算所有 movable 元件的 bbox 包围盒。
+
+        需在 env.reset() 之后调用，此时 bbox 为原始（未平移）布局。
+
+        Args:
+            env: PCBLayoutEnv 实例
+
+        Returns:
+            (min_x, min_y, max_x, max_y)；无 movable 元件时返回全零
+        """
+        if not env.movable_list:
+            return (0.0, 0.0, 0.0, 0.0)
+        min_x = min(c.bbox[0] for c in env.movable_list)
+        min_y = min(c.bbox[1] for c in env.movable_list)
+        max_x = max(c.bbox[2] for c in env.movable_list)
+        max_y = max(c.bbox[3] for c in env.movable_list)
+        return (min_x, min_y, max_x, max_y)
+
+    def _sample_legal_shift(self, env) -> Tuple[float, float]:
+        """在合法范围内随机采样一个整数格平移偏移 (dx, dy)。
+
+        合法范围 = valid_area 减去布局包围盒。布局占满板框时余量为 0，
+        退化为 (0, 0)。偏移取 CELL_SIZE 的整数倍，保证平移后仍落在网格上，
+        且所有 movable 元件仍在 valid_area 内（不越界）。
+
+        Args:
+            env: PCBLayoutEnv 实例（已 reset，movable bbox 为原始布局）
+
+        Returns:
+            (dx, dy) 平移偏移，单位 mm
+        """
+        min_x, min_y, max_x, max_y = self._compute_layout_bounds(env)
+        va_xmin, va_ymin, va_xmax, va_ymax = env.valid_area
+        cell = Config.CELL_SIZE
+
+        # dx 下界：min_x + dx >= va_xmin → dx >= va_xmin - min_x，向上取整
+        # dx 上界：max_x + dx <= va_xmax → dx <= va_xmax - max_x，向下取整
+        lo_x = int(np.ceil((va_xmin - min_x) / cell))
+        hi_x = int(np.floor((va_xmax - max_x) / cell))
+        lo_y = int(np.ceil((va_ymin - min_y) / cell))
+        hi_y = int(np.floor((va_ymax - max_y) / cell))
+
+        # 防御：布局异常（本身越界，如布局比板框还大）时 lo > hi，收敛为单点
+        lo_x = min(lo_x, hi_x)
+        lo_y = min(lo_y, hi_y)
+
+        dx = random.randint(lo_x, hi_x) * cell
+        dy = random.randint(lo_y, hi_y) * cell
+        return (dx, dy)
+
     def generate_all_expert_transitions(
         self,
         env,
         pcb_name: str,
     ) -> List[Tuple]:
-        """为一块 PCB 生成全部专家 transition。
+        """为一块 PCB 生成专家 transition，直到总数达到目标阈值。
 
-        生成 N 条随机化轨迹 → 每条反转 → 拆为 5 步子步骤 transition。
+        每次循环：随机采样合法平移偏移 → 反向拆解（带平移）→ 变异 →
+        拆为 5 步子步骤 transition → 累加，直到
+        `len(transitions) >= total_transitions` 或达到 `max_trajectories` 上限。
 
         Args:
             env: 已加载 KiCad 源数据的 PCBLayoutEnv
             pcb_name: PCB 文件名
 
         Returns:
-            所有 transition 的列表
+            所有 transition 的列表（可能略超 total_transitions）
         """
         all_transitions = []
+        traj_count = 0
 
-        for traj_idx in range(self.trajectories_per_board):
-            # 反向拆解
-            chain = self.decompose_backward(env)
+        # 先 reset 一次，确保 bbox 为原始布局，用于计算合法平移范围
+        env.reset()
+
+        while len(all_transitions) < self.total_transitions and \
+                traj_count < self.max_trajectories:
+            # 关键修复：trajectory_to_transitions() 末尾会把 env 元件 bbox 停留在
+            # "shift 后" 状态且不恢复。若不在此 reset，_sample_legal_shift() 会基于
+            # 上一轮残留的 shift 后布局计算合法范围，而 decompose_backward() 内部
+            # 又对"原始布局"应用该 shift → 采样基准与应用基准不一致 → 布局越界，
+            # 且越界会逐轮正反馈放大（小批量正常、大批量 gx 聚集 0/35 的根因）。
+            # 每轮采样前强制 reset，保证 _sample_legal_shift 始终以原始布局为基准。
+            env.reset()
+
+            # 几何平移：随机采样一个不越界的整体偏移
+            shift = self._sample_legal_shift(env)
+
+            # 反向拆解（带平移）
+            chain = self.decompose_backward(env, shift)
 
             if len(chain) < 1:
-                logger.warning(f"[{pcb_name}] traj {traj_idx}: empty chain, skipping")
+                traj_count += 1
+                logger.warning(f"[{pcb_name}] traj {traj_count}: empty chain, skipping")
                 continue
 
             # 反转 + 拆为 transition
             transitions = self.trajectory_to_transitions(env, chain)
             all_transitions.extend(transitions)
+            traj_count += 1
 
+        buffer_capacity = Config.EXPERT_BUFFER_MULTIPLIER * len(all_transitions)
         logger.info(
-            f"[{pcb_name}] Generated {self.trajectories_per_board} trajectories "
-            f"→ {len(all_transitions)} expert transitions"
+            f"[{pcb_name}] Generated {traj_count} trajectories → "
+            f"{len(all_transitions)} expert transitions "
+            f"(target={self.total_transitions}, buffer_capacity={buffer_capacity})"
         )
         return all_transitions
 
@@ -714,11 +838,11 @@ def generate_and_save_expert_transitions(
     env,
     pcb_name: str,
     output_dir: str = "data/expert_transitions",
-    trajectories_per_board: int = DEFAULT_TRAJECTORIES_PER_BOARD,
+    total_transitions: int = DEFAULT_TOTAL_TRANSITIONS,
+    max_trajectories: int = DEFAULT_MAX_TRAJECTORIES,
     epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
     pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
     rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
-    apply_penalties: bool = False,
 ) -> Tuple[List[Tuple], str]:
     """便捷函数：生成并保存一块 PCB 的专家 transition。
 
@@ -726,21 +850,21 @@ def generate_and_save_expert_transitions(
         env: 已加载 KiCad 源数据的 PCBLayoutEnv
         pcb_name: PCB 文件名
         output_dir: 输出目录
-        trajectories_per_board: 每板轨迹数
+        total_transitions: 目标 transition 总数（达到即停）
+        max_trajectories: 最大轨迹数安全上限（防死循环）
         epsilon_decompose: 拆解随机化概率
         pos_noise_prob: 位置变异概率
         rot_noise_prob: 旋转变异概率
-        apply_penalties: 专家 reward 是否携带惩罚项（False=仅品质奖励）
 
     Returns:
         (transitions, filepath) 元组
     """
     generator = ExpertTrajectoryGenerator(
-        trajectories_per_board=trajectories_per_board,
+        total_transitions=total_transitions,
+        max_trajectories=max_trajectories,
         epsilon_decompose=epsilon_decompose,
         pos_noise_prob=pos_noise_prob,
         rot_noise_prob=rot_noise_prob,
-        apply_penalties=apply_penalties,
     )
 
     transitions = generator.generate_all_expert_transitions(env, pcb_name)

@@ -201,6 +201,9 @@ def draw_layout(
     margin = max(board_w, board_h) * 0.10
     ax.set_xlim(min_x - margin, max_x + margin)
     ax.set_ylim(min_y - margin, max_y + margin)
+    # KiCad 视图 Y 轴向下（top 在上方），invert 使 y 小值显示在上方，
+    # 与 KiCad 实际视图方向一致（bbox 已约定 y1=top < y2=bottom）
+    ax.invert_yaxis()
     ax.set_aspect("equal")
 
     ax.xaxis.set_major_locator(ticker.MultipleLocator(tick_step))

@@ -248,10 +248,9 @@ class KiCadUtils:
             fp_w = pcbnew.ToMM(bbox.GetWidth())
             fp_h = pcbnew.ToMM(bbox.GetHeight())
             # AABB: (x1=left, y1=top, x2=right, y2=bottom)
-            # pcbnew 坐标系 Y 轴向下：GetTop()=视觉顶部(Y 小值)、GetBottom()=视觉底部(Y 大值)。
-            # 必须把 Y 小值放进 y1、Y 大值放进 y2，保证 bbox 为标准 AABB (y1 < y2)，
-            # 否则 pcb_utils 的 out_of_bounds_area（max(0, bymax-bymin) 恒为 0，
-            # 出界检测失效）和 bbox_overlap_penalty（dy 计算错乱，重叠/间距检测失效）都会坏。
+            # 注意：KiCad 坐标系 Y 轴向下，GetTop() 的 y 值 < GetBottom()，
+            # 为满足下游 bbox 统一约定 y1 < y2，这里 y1 取 GetTop（小值）、
+            # y2 取 GetBottom（大值）。
             bbox_mm = (
                 pcbnew.ToMM(bbox.GetLeft()),
                 pcbnew.ToMM(bbox.GetTop()),
@@ -262,7 +261,8 @@ class KiCadUtils:
             # 封装类型编码
             package_type = self._classify_package_type(footprint_name)
 
-            # 引脚信息（相对 AABB 左下角）
+            # 引脚信息（相对 AABB 左上角：x 基准=left，y 基准=top）
+            # 下游用 abs_y = bbox[1] + rel_y 恢复绝对坐标，故基准虽变但绝对值不变
             pins = []
             for pad in fp.Pads():
                 pad_pos_nm = pad.GetPosition()
@@ -452,11 +452,13 @@ class KiCadUtils:
             for zone in self.board.Zones():
                 if hasattr(zone, "GetIsRuleArea") and zone.GetIsRuleArea():
                     bbox = zone.GetBoundingBox()
+                    # 与 _cache_components 一致：y1 取 GetTop（小值）、
+                    # y2 取 GetBottom（大值），满足下游 y1 < y2 约定
                     keepouts.append((
                         pcbnew.ToMM(bbox.GetLeft()),
-                        pcbnew.ToMM(bbox.GetBottom()),
-                        pcbnew.ToMM(bbox.GetRight()),
                         pcbnew.ToMM(bbox.GetTop()),
+                        pcbnew.ToMM(bbox.GetRight()),
+                        pcbnew.ToMM(bbox.GetBottom()),
                     ))
         except Exception:
             pass

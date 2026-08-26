@@ -3,15 +3,11 @@ W_OVERLAP_HARD        = 20.0      # 硬重叠惩罚（元件物理碰撞，必�
 W_OVERLAP_SOFT        = 10.0      # 软间距惩罚（元件距离太近但不重叠）
 W_OUT_OF_BOUNDS_INITIAL= 2.0      # 出板框初始惩罚（curriculum 前期宽松）
 W_OUT_OF_BOUNDS_FINAL  = 20.0     # 出板框最终惩罚（curriculum 后期>500ep 收紧至此值）
-W_NET_AGGREGATION     = 5.0      # 网络聚集奖励（同一网络元件越近越好）
+W_NET_AGGREGATION     = 10.0      # 网络聚集奖励（同一网络元件越近越好）
 W_CONGESTION          = 5.0       # 拥塞均衡奖励（引导元件分布均匀）
 W_DECOUPLING           = 10.0     # 去耦电容配对奖励（去耦电容靠近对应 IC）
 W_LARGE_COMP           = 5.0      # 大型元件优先奖励（大元件早放有更多空位可选）
 W_COMPLETION           = 100.0    # 完成奖励（每成功放置一颗元件的基础分）
-
-# ========== Reward Clip（方案 B） ==========
-REWARD_CLIP_MIN        = -30.0   # 单步 reward 下限（截断重叠/出界等极端惩罚，防主导训练）
-REWARD_CLIP_MAX        = 200.0   # 单步 reward 上限（上调至 200，给放满8元件(200+)留足表达空间）
 
 # ========== Reward Shaping：品质项时序 ==========
 QUALITY_START_EP      = 3000      # 品质项开始介入的 episode（约束学稳后引入品质引导）
@@ -36,33 +32,34 @@ TARGET_UPDATE_FREQ  = 20         # target 网络同步频率（每 N 个 episode
 WARMUP_EPISODES     = 500        # 预热期：前 N 个 episode 只收集不学习，避免早期噪声样本污染梯度
 
 # ========== 几何阈值（单位：mm） ==========
-BOARD_MARGIN        = 0.0        # 板框边距（0=valid_area等于板框，还原专家贴边布局；原1.0内缩致Button无解）
+BOARD_MARGIN        = 0.0        # 板框内缩边距（元件必须在此范围内）
 DECOUPLING_MAX_DIST = 5.0        # 去耦电容到 IC 的最大有效距离
-CELL_SIZE           = 0.2        # 网格离散化单位（0.2mm/格，业界焊盘/元件最小间距标准；与 expert_trajectory 读取 Config.CELL_SIZE 一致）
+CELL_SIZE           = 0.2        # 网格离散化单位（0.2mm/格，细化 5 倍以表达真实元件间距）
 CONGESTION_CELL_SIZE= 2.0        # 拥塞检测的单元格大小
-DEFAULT_SPACING     = 0.2        # 默认元件间距（不匹配特定封装类型时使用）
+DEFAULT_SPACING     = 0.25       # 默认元件间距（不匹配特定封装类型时使用）
 
 # ========== 分类间距阈值（单位：mm，同类封装之间最小距离） ==========
-# 按组员业界标准（PCB 焊盘/元件最小间距 0.2mm）全部统一为 0.2，
-# 配合 CELL_SIZE=0.2 高精度网格，使 AI 能表达人类 0.2~0.48mm 的真实密度。
 SPACING_CHIP        = 0.2        # 片式元件（电阻电容电感等小封装）
-SPACING_SOIC        = 0.2        # SOIC/SOP 等翼形引脚 IC
-SPACING_QFP         = 0.2        # QFP/LQFP 四面引脚 IC
-SPACING_BGA         = 0.2        # BGA 球栅阵列 IC
-SPACING_IC          = 0.2        # 通用 IC / 连接器间距（方案A的 1.0 折中已废弃，按业界标准统一 0.2）
+SPACING_SOIC        = 0.2        # SOIC/SOP 等翼形引脚 IC（统一阈值，现阶段无大封装板）
+SPACING_QFP         = 0.2        # QFP/LQFP 四面引脚 IC（统一阈值）
+SPACING_BGA         = 0.2        # BGA 球栅阵列 IC（统一阈值）
+SPACING_IC          = 0.2        # 通用 IC 间距（统一阈值）
 
 # ========== 专家轨迹注入（Expert Trajectory Injection） ==========
-EXPERT_TRAJECTORIES_PER_BOARD = 20     # 每板生成专家轨迹数（反向拆解 + 随机化）
-EXPERT_EPSILON_DECOMPOSE      = 0.2    # 拆解随机化概率（20% 随机选 / 80% 选最小面积）
-EXPERT_POS_NOISE_PROB         = 0.2    # 位置变异概率（±1 格偏移）
-EXPERT_ROT_NOISE_PROB         = 0.1    # 旋转变异概率（±90°）
-EXPERT_BC_EPOCHS              = 50     # BC 预训练 epoch 数（恢复强专家引导，充分锚定专家方向）
-EXPERT_BUFFER_RATIO           = 0.2    # 第二阶段 buffer 中专家经验占比（恢复 0.2，避免趋向无专家）
+EXPERT_TOTAL_TRANSITIONS      = 20000  # 目标专家 transition 总数（生成直到达到即停，略超可接受）
+EXPERT_MAX_TRAJECTORIES       = 5000   # 最大轨迹数安全上限（防死循环）
+EXPERT_EPSILON_DECOMPOSE      = 0.5    # 拆解随机化概率（50% 随机选 / 50% 选最小面积）
+EXPERT_POS_NOISE_PROB         = 0.2    # 位置变异概率（±2 格偏移）
+EXPERT_ROT_NOISE_PROB         = 0.1    # 旋转变异概率（全 4 种旋转）
+EXPERT_BC_EPOCHS              = 50     # BC 预训练 epoch 数（第一阶段纯监督学习）
+EXPERT_BUFFER_RATIO           = 0.2    # 第二阶段 buffer 中专家经验占比（每 batch 采样占比 20%→70%）
 EXPERT_BUFFER_MULTIPLIER      = 5      # 第二阶段 buffer 总容量 = 此值 × 专家 transition 总数
 PER_ALPHA                     = 0.6    # 优先经验回放 α（0=均匀，1=完全按优先级）
 PER_BETA_START                = 0.4    # 重要性采样 β 初始值（向 1.0 递增）
+BC_REG_LAMBDA                 = 10.0   # BC 正则化强度(策略锚定λkl)：RL loss += λkl·KL(当前策略‖冻结BC策略)；贪心甜点定稿=10（T3 15步/+77.8最优，T4=2/T5=5退化）；λv=10仍钉Q防发散
+BC_REG_TEMP                   = 1.0    # BC 正则化 softmax 温度（策略蒸馏温度）
+BC_REG_VALUE_LAMBDA           = 10.0   # BC 值正则化强度：RL loss += λv·MSE(Q当前, Q_BC)，锚定 Q 值幅度防发散（λv=0.5 太弱压不住 Q 漂）
 EXPERT_TRANSITIONS_DIR        = data/expert_transitions  # 专家 transition 序列化存储目录
-EXPERT_APPLY_PENALTIES        = 1       # 专家 reward 是否携带惩罚项（1=与 RL 真实环境一致，统一 reward 口径，解决 reward 冲突；实验 D 已验证多数板更优）
 
 # ========== 日志 & 保存 ==========
 LOG_INTERVAL        = 100        # 日志打印间隔（每 N 个 episode 输出一次）

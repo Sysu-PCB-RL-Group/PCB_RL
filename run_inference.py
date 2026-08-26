@@ -181,7 +181,8 @@ def _clamp_action_to_board(env, comp_idx: int, gx1: int, gy1: int, gx2: int, gy2
 # ==================== 推理 Episode ====================
 
 def run_inference_episode(
-    env, agent: DQNAgent, step_img_dir: Optional[str] = None
+    env, agent: DQNAgent, step_img_dir: Optional[str] = None,
+    inference_epsilon: float = 0.01,
 ) -> Tuple[float, int, int, list]:
     """执行 1 个纯推理 episode（epsilon=0，不训练，不写 buffer）。
 
@@ -208,15 +209,13 @@ def run_inference_episode(
     # 微量 epsilon 打破确定性死锁：
     # 未放置元件的 slot 全为零 → slot_encoder 输出相同 → argmax 总选索引最小的元件。
     # 若该位置与已放置元件冲突 → obs 不变 → 相同决策 → 无限循环直到 MAX_STEPS。
-    # 训练 epsilon_min=0.15 掩盖了此问题，推理 epsilon=0 完全暴露。
-    INFERENCE_EPSILON = 0.01
-
+    # 训练 epsilon_min=0.15 掩盖了此问题，推理默认 epsilon=0.01（可用 --inference-epsilon 调高以公平评估）。
     while not done:
         # ---- 5 步自回归（推理：微量 epsilon 打破死锁） ----
         for step_id in range(5):
             mask = env._build_mask_for_step(step_id)
             obs = env._get_obs_with_pending(step_id)
-            action = agent.select_action(obs, mask, step_id, epsilon=INFERENCE_EPSILON)
+            action = agent.select_action(obs, mask, step_id, epsilon=inference_epsilon)
             env._update_pending(action, step_id)
 
         # ---- env.step()（C3-5 保底：clamp 坐标到板框内） ----
@@ -383,7 +382,8 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
         start_time = time.time()
 
         for ep in range(1, MAX_ATTEMPTS + 1):
-            ep_reward, ep_steps, ep_placed, actions = run_inference_episode(env, agent)
+            ep_reward, ep_steps, ep_placed, actions = run_inference_episode(
+                env, agent, inference_epsilon=args.inference_epsilon)
 
             if ep_reward > best_reward:
                 best_reward = ep_reward
@@ -510,6 +510,10 @@ def main():
     parser.add_argument(
         "--model", type=str, default=None,
         help="训练好的模型权重路径（.pt），不指定则使用随机权重",
+    )
+    parser.add_argument(
+        "--inference-epsilon", type=float, default=0.01,
+        help="贪心推理时的探索率（打破确定性死锁，默认 0.01；调高如 0.15 可公平评估策略）",
     )
     args = parser.parse_args()
 
