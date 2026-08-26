@@ -247,12 +247,16 @@ class KiCadUtils:
             bbox = fp.GetBoundingBox()                           # pcbnew.BOX2I
             fp_w = pcbnew.ToMM(bbox.GetWidth())
             fp_h = pcbnew.ToMM(bbox.GetHeight())
-            # AABB: (x1=left, y1=bottom, x2=right, y2=top)
+            # AABB: (x1=left, y1=top, x2=right, y2=bottom)
+            # pcbnew 坐标系 Y 轴向下：GetTop()=视觉顶部(Y 小值)、GetBottom()=视觉底部(Y 大值)。
+            # 必须把 Y 小值放进 y1、Y 大值放进 y2，保证 bbox 为标准 AABB (y1 < y2)，
+            # 否则 pcb_utils 的 out_of_bounds_area（max(0, bymax-bymin) 恒为 0，
+            # 出界检测失效）和 bbox_overlap_penalty（dy 计算错乱，重叠/间距检测失效）都会坏。
             bbox_mm = (
                 pcbnew.ToMM(bbox.GetLeft()),
-                pcbnew.ToMM(bbox.GetBottom()),
-                pcbnew.ToMM(bbox.GetRight()),
                 pcbnew.ToMM(bbox.GetTop()),
+                pcbnew.ToMM(bbox.GetRight()),
+                pcbnew.ToMM(bbox.GetBottom()),
             )
 
             # 封装类型编码

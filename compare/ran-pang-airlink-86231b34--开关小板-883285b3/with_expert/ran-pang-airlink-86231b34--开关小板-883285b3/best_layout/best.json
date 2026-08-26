@@ -1,0 +1,182 @@
+{
+  "episode": 86558,
+  "reward": 163.50802794562497,
+  "board_bounds": {
+    "min_x": 145.4,
+    "min_y": 105.4,
+    "max_x": 154.6,
+    "max_y": 114.6,
+    "width": 9.199999999999989,
+    "height": 9.199999999999989
+  },
+  "grid": {
+    "width": 7,
+    "height": 7,
+    "cell_size": 1.0
+  },
+  "movable_count": 6,
+  "fixed_count": 0,
+  "components": [
+    {
+      "id": "Pad_e15",
+      "footprint": "Pad_e15",
+      "package_type": 4,
+      "bbox": [
+        150.4,
+        110.4,
+        151.4,
+        111.4
+      ],
+      "rotation": 1,
+      "layer": 1,
+      "is_fixed": false,
+      "is_placed": true,
+      "nets": [
+        "VBAT"
+      ],
+      "footprint_w": 1.524,
+      "footprint_h": 1.524
+    },
+    {
+      "id": "Pad_e16",
+      "footprint": "Pad_e16",
+      "package_type": 4,
+      "bbox": [
+        147.4,
+        107.4,
+        148.4,
+        108.4
+      ],
+      "rotation": 3,
+      "layer": 1,
+      "is_fixed": false,
+      "is_placed": true,
+      "nets": [
+        "WIRED_POW"
+      ],
+      "footprint_w": 1.524,
+      "footprint_h": 1.524
+    },
+    {
+      "id": "Pad_e14",
+      "footprint": "Pad_e14",
+      "package_type": 4,
+      "bbox": [
+        150.4,
+        107.4,
+        151.4,
+        108.4
+      ],
+      "rotation": 3,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": true,
+      "nets": [
+        "WIRED_POW"
+      ],
+      "footprint_w": 1.524,
+      "footprint_h": 1.524
+    },
+    {
+      "id": "Pad_e13",
+      "footprint": "Pad_e13",
+      "package_type": 4,
+      "bbox": [
+        146.4,
+        112.4,
+        147.4,
+        113.4
+      ],
+      "rotation": 1,
+      "layer": 0,
+      "is_fixed": false,
+      "is_placed": true,
+      "nets": [
+        "WIRELESS_POW"
+      ],
+      "footprint_w": 1.524,
+      "footprint_h": 1.524
+    },
+    {
+      "id": "Pad_e18",
+      "footprint": "Pad_e18",
+      "package_type": 4,
+      "bbox": [
+        147.4,
+        111.4,
+        148.4,
+        112.4
+      ],
+      "rotation": 1,
+      "layer": 1,
+      "is_fixed": false,
+      "is_placed": true,
+      "nets": [
+        "WIRELESS_POW"
+      ],
+      "footprint_w": 1.524,
+      "footprint_h": 1.524
+    },
+    {
+      "id": "Pad_e17",
+      "footprint": "Pad_e17",
+      "package_type": 4,
+      "bbox": [
+        149.4,
+        112.4,
+        150.4,
+        113.4
+      ],
+      "rotation": 0,
+      "layer": 1,
+      "is_fixed": false,
+      "is_placed": true,
+      "nets": [
+        "VBAT"
+      ],
+      "footprint_w": 1.524,
+      "footprint_h": 1.524
+    }
+  ],
+  "nets": {
+    "VBAT": {
+      "is_power": true,
+      "connections": [
+        [
+          "Pad_e15",
+          "0"
+        ],
+        [
+          "Pad_e17",
+          "2"
+        ]
+      ]
+    },
+    "WIRED_POW": {
+      "is_power": false,
+      "connections": [
+        [
+          "Pad_e16",
+          "1"
+        ],
+        [
+          "Pad_e14",
+          "1"
+        ]
+      ]
+    },
+    "WIRELESS_POW": {
+      "is_power": false,
+      "connections": [
+        [
+          "Pad_e13",
+          "2"
+        ],
+        [
+          "Pad_e18",
+          "3"
+        ]
+      ]
+    }
+  }
+}

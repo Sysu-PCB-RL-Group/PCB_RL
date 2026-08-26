@@ -38,6 +38,9 @@ result*/
 # PCB data（根据需要取消注释）
 # kicad-native-batch/
 
+# 本地专家轨迹备份（不提交）
+data/expert_transitions_backup_clip60/
+
 # OS files
 .DS_Store
 Thumbs.db

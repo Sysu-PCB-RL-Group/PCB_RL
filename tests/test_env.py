@@ -310,14 +310,19 @@ def test_early_stop_on_low_reward():
         if info1["placed_count"] == 0:
             pytest.skip("First placement failed, cannot test early stop")
 
-        # 用元件 1 叠放在元件 0 的同一位置 → 巨额碰撞惩罚
-        comp1 = env.movable_list[1]
-        ndx1 = max(1, int(comp1.footprint_w / Config.CELL_SIZE))
-        ndy1 = max(1, int(comp1.footprint_h / Config.CELL_SIZE))
-        action1 = (1, 10, 10, 10 + ndx1, 10 + ndy1, 0, 0)
-        obs, r2, _, truncated, _ = env.step(action1)
+        # 用元件 1/2/3 连续叠放在元件 0 的同一位置 → 多次巨额碰撞惩罚。
+        # 注意：Reward Clip 将单步惩罚限制在 [-30, 60]，单次违规不足以低于阈值，
+        # 需多次违规累计 reward 跌至 EARLY_STOP_THRESHOLD 以下才触发早停。
+        truncated = False
+        for idx in range(1, min(4, env.N_movable)):
+            comp = env.movable_list[idx]
+            ndx1 = max(1, int(comp.footprint_w / Config.CELL_SIZE))
+            ndy1 = max(1, int(comp.footprint_h / Config.CELL_SIZE))
+            obs, r, _, truncated, _ = env.step((idx, 10, 10, 10 + ndx1, 10 + ndy1, 0, 0))
+            if truncated:
+                break
         assert truncated, (
-            f"Should have hit EARLY_STOP after penalty; cumulative_reward={env.cumulative_reward}"
+            f"Should have hit EARLY_STOP after penalties; cumulative_reward={env.cumulative_reward}"
         )
     finally:
         Config.EARLY_STOP_THRESHOLD = old_threshold
@@ -381,8 +386,14 @@ def test_config_load_from_file_inline_comments():
 
 
 def test_config_spacing_threshold():
-    """spacing_threshold_for 返回两个封装类型间距阈值的 max。"""
-    thresholds = [0.2, 1.25, 2.5, 5.0, 2.0]
+    """spacing_threshold_for 返回两个封装类型间距阈值的 max（读取 Config 属性而非硬编码）。"""
+    thresholds = [
+        Config.SPACING_CHIP,
+        Config.SPACING_SOIC,
+        Config.SPACING_QFP,
+        Config.SPACING_BGA,
+        Config.SPACING_IC,
+    ]
     for i in range(5):
         for j in range(5):
             expected = max(thresholds[i], thresholds[j])

@@ -108,9 +108,21 @@ def test_mutate_component_state():
         rot_noise_prob=0.1,
     )
 
-    # 创建一个包含所有 movable 元件的快照
+    # 把元件摆到 valid_area 内相互远离的分散位置，模拟"干净专家布局"
+    # （真实场景中专家目标来自 KiCad 布局，位于板框内、互不重叠）。
+    # 变异后只有"新增硬违规"（硬重叠/出界/禁止区域）才回退，
+    # 软间距与原始状态自带的轻微违规不触发回退。
     env.reset()
-    for comp in env.movable_list:
+    va = env.valid_area
+    positions = [
+        (va[0] + 10.0, va[1] + 10.0),
+        (va[0] + 35.0, va[1] + 10.0),
+        (va[0] + 60.0, va[1] + 10.0),
+        (va[0] + 10.0, va[1] + 45.0),
+        (va[0] + 35.0, va[1] + 45.0),
+    ]
+    for comp, (px, py) in zip(env.movable_list, positions):
+        comp.bbox = (px, py, px + comp.footprint_w, py + comp.footprint_h)
         comp.is_placed = True
     env.placed_list = [c.id for c in env.movable_list]
 

@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from env.pcb_layout_env import Config
+from .pcb_layout_env import Config
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ class ExpertTrajectoryGenerator:
         epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
         pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
         rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
+        apply_penalties: bool = False,
     ):
         """初始化生成器。
 
@@ -59,11 +60,16 @@ class ExpertTrajectoryGenerator:
             epsilon_decompose: 拆解随机化概率（50% 随机选 / 50% 选最小面积）
             pos_noise_prob: 位置变异概率（±1 格偏移）
             rot_noise_prob: 旋转变异概率（±90°）
+            apply_penalties: 专家 reward 是否携带惩罚项。
+                False（默认）= 只算品质奖励，与当前跨板训练行为一致；
+                True = 与 RL 真实环境 reward 完全一致（含重叠/间距/出界惩罚），
+                用于验证「专家 reward 与 RL reward 尺度错配」假说。
         """
         self.trajectories_per_board = trajectories_per_board
         self.epsilon_decompose = epsilon_decompose
         self.pos_noise_prob = pos_noise_prob
         self.rot_noise_prob = rot_noise_prob
+        self.apply_penalties = apply_penalties
 
     # ==================== 核心：反向拆解 ====================
 
@@ -136,10 +142,16 @@ class ExpertTrajectoryGenerator:
         snapshot: dict,
         env,
     ) -> dict:
-        """对元件状态施加微量变异。
+        """对元件状态施加微量变异，变异后校验违规并回退到原始干净状态。
 
         20% 概率位置 ±1 格偏移，10% 概率 rotation ±90°，70% 概率严格继承。
         层数始终严格继承。
+
+        变异后执行与 env.step() 完全相同的约束检测（硬重叠 + 软间距 + 出界 +
+        禁止区域）。一旦变异导致任何违规，立即回退到变异前的原始状态，
+        保证专家示范 transition 的 reward 恒为"零惩罚的正向品质分"：
+        专家源布局是干净的，变异是用于增加轨迹多样性的"探索"，而不是
+        引入违规示范污染 Phase 2 的 TD 学习。
 
         Args:
             comp_id: 元件 ID
@@ -147,18 +159,23 @@ class ExpertTrajectoryGenerator:
             env: PCBLayoutEnv 实例（用于获取 valid_area 边界）
 
         Returns:
-            变异后的元件状态 dict {bbox, rotation, layer}（仅包含位置/旋转/层字段）
+            变异后（或回退后）的元件状态 dict {bbox, rotation, layer}
+            （仅包含位置/旋转/层字段）
         """
         comp_state = snapshot[comp_id]
         bbox = list(comp_state["bbox"])  # [x1, y1, x2, y2]
         rotation = comp_state["rotation"]
         layer = comp_state["layer"]
 
+        # 记录原始干净状态，作为变异违规时的回退目标
+        original_bbox = tuple(bbox)
+        original_rotation = rotation
+
         # 层数始终严格继承，不变异
 
         # 位置变异：20% 概率 ±1 格
         if random.random() < self.pos_noise_prob:
-            cell_size = Config.CELL_SIZE
+            cell_size = Config.CELL_SIZE  # 跟随 Config.CELL_SIZE
             direction = random.choice(["x", "y"])
             offset = random.choice([-1, 1]) * cell_size
 
@@ -183,11 +200,86 @@ class ExpertTrajectoryGenerator:
             delta = random.choice([-1, 1])
             rotation = (rotation + delta) % 4
 
+        # ========== 变异后约束校验：新增硬违规则回退到原始状态 ==========
+        # 变异可能把专家示范推到重叠/出界位置；若不校验，这些"脏示范"会教坏
+        # BC 模仿（学到错误目标位置）。但校验要克制：
+        #   1) 只拦截"硬违规"（硬重叠/出界/禁止区域）——专家 reward 已去掉惩罚项，
+        #      软间距在专家示范中不再扣分，拦截软间距只会白白损失轨迹多样性；
+        #   2) 与变异前状态"相对比较"——原始布局本身轻微违规（如元件贴板边）
+        #      时，不应把全部变异都拒绝，否则轨迹退化为单一专家示范。
+        # 判定标准与 env._check_constraints 完全一致（含层区分）。
+        if self._has_new_hard_violations(
+            env, comp_id,
+            tuple(bbox), rotation, layer,
+            original_bbox, original_rotation, layer,
+        ):
+            bbox = list(original_bbox)
+            rotation = original_rotation
+
         return {
             "bbox": tuple(bbox),
             "rotation": rotation,
             "layer": layer,
         }
+
+    def _has_new_hard_violations(
+        self,
+        env,
+        comp_id: str,
+        new_bbox: Tuple[float, float, float, float],
+        new_rotation: int,
+        new_layer: int,
+        orig_bbox: Tuple[float, float, float, float],
+        orig_rotation: int,
+        orig_layer: int,
+    ) -> bool:
+        """检测变异后状态是否比变异前新增了硬违规（硬重叠/出界/禁止区域）。
+
+        硬违规评分 = 硬重叠面积 + 出界面积 + 禁止区域（极大值）。软间距不计入：
+        专家 reward 已去掉惩罚项，软间距在示范中无害，不应触发回退。
+
+        采用"相对比较"：只有变异后硬违规严格大于变异前才返回 True（回退）。
+        原始布局本身轻微违规（如紧凑板卡元件贴板边）时，变异被保留，
+        保证专家轨迹多样性，避免退化为单一示范。
+
+        Args:
+            env: PCBLayoutEnv 实例
+            comp_id: 元件 ID（在 env.movable_list 中查找）
+            new_bbox/new_rotation/new_layer: 变异后的目标状态
+            orig_bbox/orig_rotation/orig_layer: 变异前的原始状态
+
+        Returns:
+            True 表示变异后新增了硬违规（应回退到原始状态）
+        """
+        comp = None
+        for c in env.movable_list:
+            if c.id == comp_id:
+                comp = c
+                break
+        if comp is None:
+            return True
+
+        saved_state = (
+            comp.bbox, comp.rotation, comp.layer,
+            comp.is_placed, list(env.placed_list),
+        )
+        try:
+            def hard_score(b, rot, lay):
+                comp.bbox = b
+                comp.rotation = rot
+                comp.layer = lay
+                comp.is_placed = False
+                (total_hard_overlap, _total_soft_spacing,
+                 total_out_of_bounds, in_keepout) = env._check_constraints(comp)
+                return (
+                    total_hard_overlap + total_out_of_bounds
+                    + (1e9 if in_keepout else 0.0)
+                )
+            old_score = hard_score(orig_bbox, orig_rotation, orig_layer)
+            new_score = hard_score(new_bbox, new_rotation, new_layer)
+            return new_score > old_score + 1e-9
+        finally:
+            comp.bbox, comp.rotation, comp.layer, comp.is_placed, env.placed_list = saved_state
 
     # ==================== 轨迹 → Transition 转换 ====================
 
@@ -330,8 +422,9 @@ class ExpertTrajectoryGenerator:
         is_last_placement = (len(env.placed_list) + 1 == env.N_movable)
         done = is_last_placement
 
-        # 计算专家 reward（复用环境完整 reward，含品质项，标准与训练一致）
-        expert_reward = self._compute_expert_reward(env, comp_idx, expert_actions)
+        # 计算专家 reward（与真实环境 reward 标准完全一致：
+        # 临时放置到目标状态 → 约束检测 → env._calculate_reward(quality_scale=1.0)）
+        expert_reward = self._compute_expert_reward(env, comp_idx, expert_actions, placement_step)
 
         # 按 share_weights 分配到各子步骤
         share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]
@@ -379,50 +472,65 @@ class ExpertTrajectoryGenerator:
 
         return transitions
 
-    def _compute_expert_reward(self, env, comp_idx: int, expert_actions: List[int]) -> float:
-        """计算专家放置的完整 reward（与训练环境 _calculate_reward 完全一致）。
+    def _compute_expert_reward(
+        self, env, comp_idx: int, expert_actions: List[int], placement_step: int
+    ) -> float:
+        """计算专家放置的 reward（品质奖励与真实环境同尺度，但不含惩罚项）。
 
-        专家轨迹代表理想最终布局，因此 quality_scale 强制为 1.0（品质项完全
-        生效），复用 env._detect_collisions + env._calculate_reward，保证专家
-        注入的 reward 标签与训练 reward 标准同步（含品质项，而非仅完成奖励）。
+        临时将元件设置到目标状态，执行与 env.step() 相同的约束检测，
+        再调用 env._calculate_reward() 计算 reward（quality_scale 固定 1.0，
+        apply_penalties=False）：
+        专家示范是"应该被模仿的正确行为"，不携带惩罚项。即使真实布局与
+        环境阈值（valid_area / 间距）存在轻微偏差，也不以负 reward 惩罚示范，
+        否则 Phase 2 TD 学习会被"照专家做回报为负"的坏信号带偏。
+        品质奖励（Net 聚合度/拥塞/去耦/大元件排名）与真实环境完全同尺度，
+        保证专家 transition 的 reward 与 RL 后期真实环境 reward 量级对齐。
 
         Args:
             env: PCBLayoutEnv 实例
-            comp_idx: 元件在 movable_list 中的索引
+            comp_idx: 元件在 env.movable_list 中的索引
             expert_actions: [comp_idx, gx1, gy1, rotation, layer]
+            placement_step: 放置序号
 
         Returns:
-            完整 reward 值
+            与真实环境同标准的标量 reward
         """
         comp = env.movable_list[comp_idx]
-
-        # 保存当前元件状态，临时设为专家目标位置（与 _build_step_transitions
-        # 中 next_obs 的重建方式一致），保持 is_placed=False、不加入 placed_list，
-        # 与 env.step() 调用 _calculate_reward 时的状态约定一致。
-        saved = (comp.bbox, comp.rotation, comp.layer)
-        cell_size = Config.CELL_SIZE
-        x1 = env.valid_area[0] + expert_actions[1] * cell_size
-        y1 = env.valid_area[1] + expert_actions[2] * cell_size
-        comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
-        comp.rotation = expert_actions[3]
-        comp.layer = expert_actions[4]
+        saved_state = (
+            comp.bbox, comp.rotation, comp.layer,
+            comp.is_placed, list(env.placed_list),
+        )
 
         try:
-            total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
-                env._detect_collisions(comp)
+            # 用 grid 坐标 + 实际 footprint 重建目标 bbox（与 step 4 next_obs 构建一致）
+            cell_size = Config.CELL_SIZE
+            x1 = env.valid_area[0] + expert_actions[1] * cell_size
+            y1 = env.valid_area[1] + expert_actions[2] * cell_size
+            comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
+            comp.rotation = expert_actions[3]
+            comp.layer = expert_actions[4]
+            # 与 env.step() 计算 reward 时一致：is_placed 尚未置 True，不加入 placed_list
+            comp.is_placed = False
+
+            # 与 env.step() 相同的约束检测
+            (total_hard_overlap, total_soft_spacing,
+             total_out_of_bounds, in_keepout) = env._check_constraints(comp)
             has_violations = (
                 total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout
             )
-            return env._calculate_reward(
-                comp,
-                total_hard_overlap,
-                total_soft_spacing,
-                total_out_of_bounds,
-                has_violations,
-                quality_scale=1.0,
+
+            # quality_scale=1.0：完整版品质奖励；apply_penalties 由实例控制：
+            # 默认 False（专家示范不携带惩罚项，见 _compute_expert_reward docstring），
+            # 可设为 True 使专家 reward 与 RL 真实环境完全一致（验证 reward 尺度错配假说）
+            reward = env._calculate_reward(
+                comp, total_hard_overlap, total_soft_spacing,
+                total_out_of_bounds, has_violations, quality_scale=1.0,
+                apply_penalties=self.apply_penalties,
             )
         finally:
-            comp.bbox, comp.rotation, comp.layer = saved
+            comp.bbox, comp.rotation, comp.layer, comp.is_placed, env.placed_list = saved_state
+
+        return reward
 
     def _grid_to_bbox(
         self,
@@ -610,6 +718,7 @@ def generate_and_save_expert_transitions(
     epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
     pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
     rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
+    apply_penalties: bool = False,
 ) -> Tuple[List[Tuple], str]:
     """便捷函数：生成并保存一块 PCB 的专家 transition。
 
@@ -621,6 +730,7 @@ def generate_and_save_expert_transitions(
         epsilon_decompose: 拆解随机化概率
         pos_noise_prob: 位置变异概率
         rot_noise_prob: 旋转变异概率
+        apply_penalties: 专家 reward 是否携带惩罚项（False=仅品质奖励）
 
     Returns:
         (transitions, filepath) 元组
@@ -630,6 +740,7 @@ def generate_and_save_expert_transitions(
         epsilon_decompose=epsilon_decompose,
         pos_noise_prob=pos_noise_prob,
         rot_noise_prob=rot_noise_prob,
+        apply_penalties=apply_penalties,
     )
 
     transitions = generator.generate_all_expert_transitions(env, pcb_name)

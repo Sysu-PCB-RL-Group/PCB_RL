@@ -184,7 +184,8 @@ class DQNAgent:
             q_all = self.q_net(sub_obs, sid)
             q_vals[idx] = q_all.gather(1, actions_tensor[idx])
 
-        # 目标 Q 值：按 next_step_id 分组走对应 Head，同步 Actor 侧 mask
+        # 目标 Q 值：Double DQN —— 在线网络选动作，target 网络求值。
+        # 按 next_step_id 分组走对应 Head，Target 端掩码与 Actor 侧对称。
         target_q = torch.zeros(batch_size, 1, device=self.device)
         with torch.no_grad():
             for nsid in range(5):
@@ -196,31 +197,17 @@ class DQNAgent:
                     "component_slots": next_obs_tensor["component_slots"][nidx],
                     "global_features": next_obs_tensor["global_features"][nidx],
                 }
-                next_q_all = self.target_net(sub_next, nsid)
+                # 在线网络选择下一状态最优动作（解耦选择与求值，缓解过估计）
+                online_q = self._apply_next_state_mask(self.q_net(sub_next, nsid), sub_next, nsid)
+                best_actions = online_q.argmax(dim=1, keepdim=True)  # (n_subset, 1)
 
-                if nsid == 0:
-                    # 从 Dict 观测提取 placed_flag（每个 slot 的第 0 维）
-                    placed_flags = sub_next["component_slots"][:, :, 0]  # (n_subset, M)
-                    comp_mask = (placed_flags < 0.5).to(self.device)  # True=未放置=可选
-                    next_q_all[~comp_mask] = -float('inf')
+                # target 网络对所选动作求值（同步相同掩码，防止 gather 选中非法动作）
+                target_q_all = self._apply_next_state_mask(
+                    self.target_net(sub_next, nsid), sub_next, nsid
+                )
+                target_q[ns_idx] = target_q_all.gather(1, best_actions)
 
-                elif nsid == 1:
-                    # x1 坐标掩码：屏蔽超出真实网格宽度的坐标
-                    # global_features[0] = grid_width / GRID_W
-                    grid_w = (sub_next["global_features"][:, 0] * Config.GRID_W).round().long()
-                    x_mask = torch.arange(Config.GRID_W, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
-                    next_q_all[~x_mask] = -float('inf')
-
-                elif nsid == 2:
-                    # y1 坐标掩码：屏蔽超出真实网格高度的坐标
-                    # global_features[1] = grid_height / GRID_H
-                    grid_h = (sub_next["global_features"][:, 1] * Config.GRID_H).round().long()
-                    y_mask = torch.arange(Config.GRID_H, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
-                    next_q_all[~y_mask] = -float('inf')
-
-                target_q[ns_idx] = next_q_all.max(1)[0].unsqueeze(1)
-
-        # 标准 DQN 目标：r + γ * max Q(s', a') * (1 - done)
+        # Double DQN 目标：r + γ * Q_target(s', argmax_a Q_online(s', a)) * (1 - done)
         target = rewards_tensor + self.gamma * target_q * (1.0 - dones_tensor)
 
         # PER 重要性采样加权：逐样本平方误差 × IS 权重 → 加权平均
@@ -242,6 +229,41 @@ class DQNAgent:
         # 逐样本 TD-error（供 PER 优先级更新）
         td_errors = (target - q_vals).detach().cpu().numpy().flatten()
         return loss.item(), td_errors
+
+    @staticmethod
+    def _apply_next_state_mask(q_all: torch.Tensor, sub_next: dict, nsid: int) -> torch.Tensor:
+        """对下一状态 Q 值应用与 Actor 侧对称的掩码（Double DQN 中 online/target 共用）。
+
+        nsid=0: placed_flag 屏蔽已放置元件
+        nsid=1: grid_width 屏蔽越界 x1 坐标
+        nsid=2: grid_height 屏蔽越界 y1 坐标
+        nsid=3/4: 无需掩码
+
+        兜底：某样本的候选动作被全部屏蔽时（如 nsid=0 已无未放置元件），
+        将整行重置为 0，避免 argmax 选中 -inf 产生 NaN loss。
+        """
+        if nsid == 0:
+            placed_flags = sub_next["component_slots"][:, :, 0]  # (n, M)
+            comp_mask = (placed_flags < 0.5).to(q_all.device)    # True=未放置=可选
+            q_all[~comp_mask] = -float('inf')
+        elif nsid == 1:
+            # x1 坐标掩码：屏蔽超出真实网格宽度的坐标
+            # global_features[0] = grid_width / GRID_W
+            grid_w = (sub_next["global_features"][:, 0] * Config.GRID_W).round().long()
+            x_mask = torch.arange(Config.GRID_W, device=q_all.device).unsqueeze(0) < grid_w.unsqueeze(1)
+            q_all[~x_mask] = -float('inf')
+        elif nsid == 2:
+            # y1 坐标掩码：屏蔽超出真实网格高度的坐标
+            # global_features[1] = grid_height / GRID_H
+            grid_h = (sub_next["global_features"][:, 1] * Config.GRID_H).round().long()
+            y_mask = torch.arange(Config.GRID_H, device=q_all.device).unsqueeze(0) < grid_h.unsqueeze(1)
+            q_all[~y_mask] = -float('inf')
+
+        # 兜底：候选动作全部被屏蔽的行重置为 0（避免 -inf 传播到 target）
+        all_masked = ~torch.isfinite(q_all).any(dim=1)
+        if all_masked.any():
+            q_all[all_masked] = 0.0
+        return q_all
 
     def learn_bc(self, expert_transitions: List[Tuple], batch_size: int = 64,
                  epochs: int = 50, verbose: bool = True) -> List[float]:

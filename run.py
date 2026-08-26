@@ -104,6 +104,10 @@ class Runner:
         self.expert_transitions_dir: str = ""
         self.expert_transitions_count: int = 0  # 专家 transition 总数
         self.use_expert: bool = getattr(args, "use_expert", True)  # 是否启用专家注入
+        # 可选：由外层（对照实验调度器）注入的专家目录覆盖值，
+        # 优先于 Config.EXPERT_TRANSITIONS_DIR（字符串路径无法经 argument.txt 注入）
+        self._expert_transitions_dir_override: str = getattr(
+            args, "expert_transitions_dir", "") or ""
 
     def run(self):
         """两阶段训练循环：Phase 1 BC 预训练 + Phase 2 RL + 专家注入。"""
@@ -473,9 +477,14 @@ class Runner:
         epsilon_decompose = getattr(Config, "EXPERT_EPSILON_DECOMPOSE", 0.5)
         pos_noise_prob = getattr(Config, "EXPERT_POS_NOISE_PROB", 0.2)
         rot_noise_prob = getattr(Config, "EXPERT_ROT_NOISE_PROB", 0.1)
+        # 专家 reward 是否携带惩罚项（False=仅品质奖励；True=与 RL 真实环境一致）
+        expert_apply_penalties = bool(getattr(Config, "EXPERT_APPLY_PENALTIES", False))
 
         # 输出目录（相对路径 → 基于项目根目录的绝对路径）
-        expert_dir = getattr(Config, "EXPERT_TRANSITIONS_DIR", "data/expert_transitions")
+        # 优先使用外层调度器注入的覆盖目录（对照实验隔离缓存），否则用 Config 默认值
+        expert_dir = self._expert_transitions_dir_override
+        if not expert_dir:
+            expert_dir = getattr(Config, "EXPERT_TRANSITIONS_DIR", "data/expert_transitions")
         if not os.path.isabs(expert_dir):
             expert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), expert_dir)
         self.expert_transitions_dir = expert_dir
@@ -505,6 +514,7 @@ class Runner:
                     epsilon_decompose=epsilon_decompose,
                     pos_noise_prob=pos_noise_prob,
                     rot_noise_prob=rot_noise_prob,
+                    apply_penalties=expert_apply_penalties,
                 )
 
             all_transitions.extend(transitions)

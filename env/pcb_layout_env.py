@@ -29,6 +29,19 @@ class Config:
     W_DECOUPLING: float = 10.0
     W_LARGE_COMP: float = 5.0
     W_COMPLETION: float = 200.0
+    # 方案 1（reward shaping）：稀疏性缓解。
+    # W_SHAPE_STEP：每放一个元件、随"已放数量占比"递增的 shaping 奖励上限（加到 completion_partial 上），
+    #   从第 1 个（≈0）平滑升到第 N 个（≈W_SHAPE_STEP），给"接近放满"更值钱的梯度。
+    # W_COMPLETION_BONUS：放满全部 N 个时的一次性大 bonus，给"坚持放满"明确目标，
+    #   替代原实现 completion_bonus = W_COMPLETION - W_COMPLETION/N*N = 0 的死奖励。
+    W_SHAPE_STEP: float = 75.0
+    W_COMPLETION_BONUS: float = 100.0
+
+    # Reward Clip（方案 B）：限制单步 reward 范围，防止极端惩罚/奖励主导训练。
+    # 下限比上限更紧：重叠/出界惩罚极端值被截断，但轻微 vs 严重违规仍可区分；
+    # 上限较松：保留完成奖励（200/N）与品质奖励的比例信息。
+    REWARD_CLIP_MIN: float = -30.0  # 单步 reward 下限（截断极端惩罚）
+    REWARD_CLIP_MAX: float = 200.0  # 单步 reward 上限（上调至 200，给放满留足表达空间）
 
     # Reward Shaping：品质项时序控制
     QUALITY_START_EP: int = 10000
@@ -43,7 +56,7 @@ class Config:
     EARLY_STOP_THRESHOLD: float = -150.0
     EPSILON_START: float = 0.6
     EPSILON_MIN: float = 0.1
-    EPSILON_DECAY_EPISODES: int = 10000  # ε 衰减最短收敛区间（下限），总 epi 超过此值时按实际总 epi 收敛
+    EPSILON_DECAY_EPISODES: int = 10000  # ε 衰减参考 ep 数（与 TOTAL_EPISODES 解耦）
     CURRICULUM_START_EP: int = 0
     CURRICULUM_END_EP: int = 500
 
@@ -55,10 +68,28 @@ class Config:
     WARMUP_EPISODES: int = 500
 
     # 几何阈值
-    BOARD_MARGIN: float = 1.0
+    # valid_area 板框边距。原为 1.0（内缩），会缩小可放置区，
+    # 导致 Button 等板（U1 按键 11.35mm > 内缩后 10mm 高度）无合法解而学不动。
+    # 改为 0.0（valid_area = 板框本身），可还原专家贴边布局，所有板均可放置。
+    BOARD_MARGIN: float = 0.0
     DECOUPLING_MAX_DIST: float = 5.0
-    CELL_SIZE: float = 1.0
+    CELL_SIZE: float = 0.2   # 布局网格分辨率 (mm)；0.2mm/格（业界焊盘/元件最小间距标准）
     CONGESTION_CELL_SIZE: float = 2.0
+
+    # 分类间距阈值（mm），经 spacing_threshold_for 查表使用。
+    # 可经 argument.txt 注入（load_from_file 要求 hasattr 存在，故必须在此定义）。
+    # 与 argument.txt 中的 SPACING_CHIP/SOIC/QFP/BGA/IC 一一对应；
+    # 原实现硬编码字面量 [0.2,1.2,2.4,5.0,2.0] 导致 argument.txt 里这些键失效，
+    # 现改为读取本类属性，修复"死配置"。
+    # 按组员业界标准（PCB 焊盘/元件最小间距 0.2mm）：阈值表全部统一为 0.2mm，
+    # 配合 CELL_SIZE=0.2 网格，使 AI 能表达人类 0.2~0.48mm 的真实密度，
+    # 不再因过严间距误伤完美布局（替代此前方案 A 的 SPACING_IC 1.0 折中）。
+    SPACING_CHIP: float = 0.2   # 片式元件（电阻电容电感等小封装）
+    SPACING_SOIC: float = 0.2   # SOIC/SOT/QFN 等翼形引脚 IC
+    SPACING_QFP: float = 0.2    # QFP/TQFP 等四面引脚 IC
+    SPACING_BGA: float = 0.2    # BGA 球栅阵列
+    SPACING_IC: float = 0.2     # 通用 IC / 连接器
+    DEFAULT_SPACING: float = 0.2  # 未匹配特定封装时的默认间距
 
     # 固定维度上限（支持不同 PCB 使用同一网络）
     # 当前针对开关小板（6 元件, 7×7 grid），设为实际值的 2 倍
@@ -83,6 +114,9 @@ class Config:
     PER_ALPHA: float = 0.6
     PER_BETA_START: float = 0.4
     EXPERT_TRANSITIONS_DIR: str = "data/expert_transitions"
+    # 专家 reward 是否携带惩罚项（0=仅品质奖励，1=与 RL 真实环境一致，用于验证 reward 尺度错配假说）
+    # 必须在此定义，否则 load_from_file 的 hasattr(cls, key) 判断失败，无法经 argument.txt 注入
+    EXPERT_APPLY_PENALTIES: int = 0
 
     @classmethod
     def load_from_file(cls, path: str):
@@ -158,7 +192,13 @@ class Config:
         Returns:
             两元件间距阈值 (mm)，取两者阈值之 max
         """
-        thresholds = [0.2, 1.25, 2.5, 5.0, 2.0]
+        thresholds = [
+            cls.SPACING_CHIP,  # 0: Chip（片式小封装）
+            cls.SPACING_SOIC,  # 1: SOIC/SOT/QFN
+            cls.SPACING_QFP,   # 2: QFP 类
+            cls.SPACING_BGA,   # 3: BGA/阵列类
+            cls.SPACING_IC,    # 4: 通用 IC / 连接器
+        ]
         return max(thresholds[type_a], thresholds[type_b])
 
 
@@ -366,9 +406,9 @@ class PCBLayoutEnv(gym.Env):
         component.rotation = rot_idx
         component.layer = lay_idx
 
-        # 6. 约束检测（复用 _detect_collisions，与专家轨迹生成共享同一套碰撞标准）
-        total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
-            self._detect_collisions(component)
+        # 6. 约束检测（硬重叠 + 软间距 + 出界 + 禁止区域）
+        (total_hard_overlap, total_soft_spacing,
+         total_out_of_bounds, in_keepout) = self._check_constraints(component)
 
         # 7. 计算 reward
         has_violations = (total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout)
@@ -604,15 +644,13 @@ class PCBLayoutEnv(gym.Env):
             return 1.0
         return (ep - start) / ramp
 
-    def _detect_collisions(self, component) -> Tuple[float, float, float, bool]:
-        """检测当前元件与已放置/固定元件的碰撞、出界与禁止区情况。
+    def _check_constraints(self, component):
+        """约束检测：硬重叠 + 软间距 + 出界 + 禁止区域。
 
-        供 env.step() 与专家轨迹生成共享，保证两处使用完全一致的
-        碰撞判定标准（硬重叠、软间距、出界、keepout）。
+        供 env.step() 与 expert_trajectory 复用，保证两者 reward 标准一致。
 
         Args:
-            component: 当前放置的元件（bbox/rotation/layer 已更新为目标位置，
-                is_placed 尚未置 True，不在 placed_list 中）
+            component: 当前放置的元件（bbox 需已更新为目标位置）
 
         Returns:
             (total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout)
@@ -626,6 +664,10 @@ class PCBLayoutEnv(gym.Env):
 
         for other in all_fixed_comps:
             if other.id == component.id:
+                continue
+            # 不同层（TOP/BOTTOM）元件物理上不接触，允许 2D 投影重叠，
+            # 不检测硬重叠/软间距。只有同层元件之间才存在物理碰撞可能。
+            if other.layer != component.layer:
                 continue
             threshold = Config.spacing_threshold_for(
                 component.package_type, other.package_type
@@ -646,6 +688,10 @@ class PCBLayoutEnv(gym.Env):
 
         return total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout
 
+    # 兼容别名：远程代码以 _detect_collisions 命名同一约束检测逻辑，
+    # 保留该别名避免任何外部调用报错（实现完全一致，含层区分）。
+    _detect_collisions = _check_constraints
+
     def _calculate_reward(
         self,
         component,
@@ -653,11 +699,12 @@ class PCBLayoutEnv(gym.Env):
         total_soft_spacing: float,
         total_out_of_bounds: float,
         has_violations: bool,
-        quality_scale: Optional[float] = None,
+        quality_scale: float = None,
+        apply_penalties: bool = True,
     ) -> float:
         """计算 reward。
 
-        惩罚项（始终生效）：硬重叠 + 软间距 + 出界。
+        惩罚项（apply_penalties=True 时生效）：硬重叠 + 软间距 + 出界。
         基础奖励（始终生效）：完成奖励。
         品质奖励（quality_scale 升温控制）：Net 聚合度 + 拥塞均衡度 + 去耦电容 + 大元件排名。
 
@@ -667,8 +714,16 @@ class PCBLayoutEnv(gym.Env):
             total_soft_spacing: 软间距累计惩罚
             total_out_of_bounds: 出界累计面积
             has_violations: 是否存在任何违规
-            quality_scale: 品质项权重缩放系数；None 时按 current_episode 升温
-                （训练路径），否则用传入值（专家轨迹传 1.0 表示理想布局满分）
+            quality_scale: 品质项缩放系数。None（默认）时按 current_episode 线性升温，
+                由 env.step() 使用；expert_trajectory 生成专家 transition 时固定传 1.0，
+                保证专家 reward 与真实环境完整版 reward 标准一致。
+            apply_penalties: 是否应用惩罚项。默认 True（真实环境 step()）。
+                专家轨迹生成时传 False：专家示范是"应该被模仿的正确行为"，即使
+                真实 KiCad 布局与环境的 valid_area/间距阈值存在轻微偏差（如紧凑
+                板卡元件间距 < 阈值、元件贴近板边），也不应以负 reward 惩罚示范
+                本身——否则 Phase 2 TD 学习中专家 transition 会教 agent
+                "照着专家做回报为负"，把 Q 值带偏。真实环境的出界/重叠约束
+                依然生效，RL 阶段 agent 仍会被正确惩罚。
 
         Returns:
             标量 reward 值
@@ -678,22 +733,22 @@ class PCBLayoutEnv(gym.Env):
         reward = 0.0
         breakdown = {}
 
-        # ========== 惩罚项（始终生效） ==========
+        # ========== 惩罚项（apply_penalties=True 时生效） ==========
+        if apply_penalties:
+            # 硬重叠
+            penalty_hard = Config.W_OVERLAP_HARD * total_hard_overlap
+            reward -= penalty_hard
+            breakdown["overlap_hard"] = -penalty_hard
 
-        # 硬重叠
-        penalty_hard = Config.W_OVERLAP_HARD * total_hard_overlap
-        reward -= penalty_hard
-        breakdown["overlap_hard"] = -penalty_hard
+            # 软间距
+            penalty_soft = Config.W_OVERLAP_SOFT * total_soft_spacing
+            reward -= penalty_soft
+            breakdown["overlap_soft"] = -penalty_soft
 
-        # 软间距
-        penalty_soft = Config.W_OVERLAP_SOFT * total_soft_spacing
-        reward -= penalty_soft
-        breakdown["overlap_soft"] = -penalty_soft
-
-        # 出界
-        penalty_oob = self.W_OUT_OF_BOUNDS_CURRENT * total_out_of_bounds
-        reward -= penalty_oob
-        breakdown["out_of_bounds"] = -penalty_oob
+            # 出界
+            penalty_oob = self.W_OUT_OF_BOUNDS_CURRENT * total_out_of_bounds
+            reward -= penalty_oob
+            breakdown["out_of_bounds"] = -penalty_oob
 
         # ========== 品质奖励（quality_scale 升温控制） ==========
 
@@ -766,17 +821,32 @@ class PCBLayoutEnv(gym.Env):
         breakdown["large_comp"] = large_comp_reward * quality_scale
 
         # ========== 完成奖励（始终生效） ==========
-
+        # 方案 1（reward shaping）：降低稀疏性，给"接近放满"递增奖励 + "放满"大 bonus。
+        # 原实现每步 +W_COMPLETION/N（200/8=25），放满时 completion_bonus = 200-200 = 0，
+        # 导致"最后一步放满"与"放第 1 个"奖励相同，模型无强烈动机坚持到第 8 个。
+        # 现改为：
+        #   - 每放一个元件：completion_partial = W_COMPLETION/N（仍为 25），
+        #     但加上与已放数量成正比的 shaping：current_step/N × W_SHAPE_STEP，
+        #     让"越接近放满"每步越值钱（从 25 平滑升到 25+W_SHAPE_STEP）。
+        #   - 放满 N 个：额外一次性 completion_bonus = W_COMPLETION_BONUS（显著正数），
+        #     给"坚持放满"一个明确的大目标奖励。
         if not has_violations:
+            current_step = len(self.placed_list) + 1  # 当前是第几个（1-based）
             completion_partial = Config.W_COMPLETION / max(self.N_movable, 1)
-            reward += completion_partial
+            shape_step = (current_step / max(self.N_movable, 1)) * Config.W_SHAPE_STEP
+            reward += completion_partial + shape_step
             breakdown["completion_partial"] = completion_partial
-            if len(self.placed_list) + 1 == self.N_movable:
-                completion_bonus = Config.W_COMPLETION - completion_partial * self.N_movable
-                reward += completion_bonus
-                breakdown["completion_full"] = completion_bonus
+            breakdown["completion_shaping"] = shape_step
+            if current_step == self.N_movable:
+                reward += Config.W_COMPLETION_BONUS
+                breakdown["completion_full"] = Config.W_COMPLETION_BONUS
 
         breakdown["quality_scale"] = quality_scale
+
+        # Reward Clip（方案 B）：限制单步 reward 范围，防止极端值主导 TD 目标
+        reward = float(np.clip(reward, Config.REWARD_CLIP_MIN, Config.REWARD_CLIP_MAX))
+        breakdown["reward_clipped"] = reward
+
         self._last_reward_breakdown = breakdown
         return reward
 
