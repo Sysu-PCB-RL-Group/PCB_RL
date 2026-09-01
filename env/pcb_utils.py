@@ -211,13 +211,12 @@ class PCBUtils:
         ic_cx, ic_cy = ic.center
         cap_cx, cap_cy = cap.center
 
-        # 收集 IC 所有引脚的绝对坐标
+        # 收集 IC 所有引脚的绝对坐标。
+        # 必须用 ic.pin_abs_positions()（相对当前 bbox 中心 + 该旋转的预计算偏移），
+        # 不能用 bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
         # TODO: 待 kicad_utils 支持 pin→net 映射后，改为仅过滤电源网络引脚
-        pin_abs_positions = []
-        for pin_num, rel_x, rel_y in ic.pins:
-            abs_x = ic.bbox[0] + rel_x
-            abs_y = ic.bbox[1] + rel_y
-            pin_abs_positions.append((abs_x, abs_y))
+        pin_abs_positions = [(abs_x, abs_y)
+                             for _pin_num, abs_x, abs_y in ic.pin_abs_positions()]
 
         if not pin_abs_positions:
             # 无法获取引脚坐标 → 退化为中心点距离

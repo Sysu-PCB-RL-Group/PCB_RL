@@ -191,6 +191,18 @@ class ExpertTrajectoryGenerator:
         # 旋转变异：10% 概率变为其它 3 种旋转之一（覆盖全 4 种旋转）
         if random.random() < self.rot_noise_prob:
             rotation = random.choice([r for r in range(4) if r != rotation])
+            # 旋转改变后 AABB 宽高可能交换：保持 bbox 中心不变重设尺寸，
+            # 否则 bbox 尺寸与目标姿态不符（碰撞/reward 用错几何）
+            src_rot = comp_state.get("source_rotation", comp_state["rotation"])
+            if (rotation - src_rot) % 4 % 2 == 1:
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+                cx = (bbox[0] + bbox[2]) / 2.0
+                cy = (bbox[1] + bbox[3]) / 2.0
+                bbox[0] = cx - h / 2.0
+                bbox[1] = cy - w / 2.0
+                bbox[2] = cx + h / 2.0
+                bbox[3] = cy + w / 2.0
 
         # 合法性检查：越界或硬重叠则回退到原始状态
         mutated_bbox = tuple(bbox)
@@ -477,7 +489,9 @@ class ExpertTrajectoryGenerator:
                 cell_size = Config.CELL_SIZE
                 x1 = env.valid_area[0] + expert_actions[1] * cell_size
                 y1 = env.valid_area[1] + expert_actions[2] * cell_size
-                comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
+                # 按目标旋转的真实尺寸重建 bbox（宽高随旋转交换）
+                tw, th = comp.dims_at_rotation(expert_actions[3])
+                comp.bbox = (x1, y1, x1 + tw, y1 + th)
                 comp.rotation = expert_actions[3]
                 comp.layer = expert_actions[4]
                 comp.is_placed = True
@@ -526,7 +540,9 @@ class ExpertTrajectoryGenerator:
         cell_size = Config.CELL_SIZE
         x1 = env.valid_area[0] + expert_actions[1] * cell_size
         y1 = env.valid_area[1] + expert_actions[2] * cell_size
-        comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
+        # 按目标旋转的真实尺寸重建 bbox（宽高随旋转交换）
+        tw, th = comp.dims_at_rotation(expert_actions[3])
+        comp.bbox = (x1, y1, x1 + tw, y1 + th)
         comp.rotation = expert_actions[3]
         comp.layer = expert_actions[4]
 
@@ -602,7 +618,8 @@ class ExpertTrajectoryGenerator:
 
         x1 = env.valid_area[0] + gx1 * cell_size
         y1 = env.valid_area[1] + gy1 * cell_size
-        # 保持 bbox 宽高不变（宽高 = footprint_w/h，与 reward 重建公式一致）
+        # 只把原点对齐到网格，宽高保持传入 bbox 不变（由调用方用
+        # dims_at_rotation(target_rot) 重建，保证与 reward/next_obs 一致）
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
         return (gx1, gy1, (x1, y1, x1 + w, y1 + h))
@@ -648,6 +665,7 @@ class ExpertTrajectoryGenerator:
                 "nets": list(comp.nets),
                 "footprint_w": comp.footprint_w,
                 "footprint_h": comp.footprint_h,
+                "source_rotation": getattr(comp, "source_rotation", comp.rotation),
             }
         return snapshot
 

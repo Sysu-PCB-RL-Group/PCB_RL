@@ -66,13 +66,16 @@ class Component:
     is_fixed: bool                       # 是否固定（不可移动）
     is_placed: bool                      # 是否已放置
     nets: List[str]                      # 该元件连接的网络 ID 列表
-    pins: List[Tuple[str, float, float]] # [(pin_number, rel_x, rel_y), ...] 相对 AABB 左下角的引脚坐标
-    footprint_w: float                   # 封装原始宽度 mm（0° rotation）
-    footprint_h: float                   # 封装原始高度 mm（0° rotation）
+    pins: List[Tuple[str, float, float]] # [(pin_number, rel_x, rel_y), ...] 相对【源姿态】bbox 左上角的引脚坐标
+    footprint_w: float                   # 源姿态下的 AABB 宽度 mm（非 0° 尺寸）
+    footprint_h: float                   # 源姿态下的 AABB 高度 mm
+    source_rotation: int                 # 源文件中的旋转（0-3），footprint_w/h 的测量姿态
+    source_bbox: Tuple[float, float, float, float]  # 源姿态 AABB（导入时，不可变）
+    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]]  # r∈0..3 各 pad 相对该旋转 bbox 中心的偏移
 
     @property
     def footprint_area(self) -> float:
-        """封装面积 mm²"""
+        """封装面积 mm²（源姿态下的面积，旋转不改变面积）"""
         return self.footprint_w * self.footprint_h
 
     @property
@@ -80,6 +83,22 @@ class Component:
         """从 AABB 推导中心点（mm）"""
         return ((self.bbox[0] + self.bbox[2]) / 2,
                 (self.bbox[1] + self.bbox[3]) / 2)
+
+    def dims_at_rotation(self, target_rotation: int) -> Tuple[float, float]:
+        """目标旋转下的 AABB 宽高：相对 source_rotation 的 delta 为奇数时交换。"""
+        delta = (target_rotation - self.source_rotation) % 4
+        if delta % 2 == 0:
+            return self.footprint_w, self.footprint_h
+        return self.footprint_h, self.footprint_w
+
+    def pin_abs_positions(self, rotation: int = None) -> List[Tuple[str, float, float]]:
+        """指定（或当前）旋转下各引脚的绝对坐标：bbox 中心 + 预计算偏移。"""
+        if rotation is None:
+            rotation = self.rotation
+        cx, cy = self.center
+        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        return [(num, cx + ox, cy + oy)
+                for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)]
 ```
 
 #### 2.1.1 封装类型编码
@@ -407,9 +426,10 @@ Step 3: gy1     = argmax Q_y1(obs)        ← Discrete(grid_height)
 Step 4: rot     = argmax Q_rot(obs)       ← Discrete(4)
 Step 5: lay     = argmax Q_lay(obs)       ← Discrete(2)
 
-最终动作组装：
-    gx2 = gx1 + footprint_w / CELL_SIZE
-    gy2 = gy1 + footprint_h / CELL_SIZE
+最终动作组装（目标旋转下真实尺寸，网格占用向上取整 ceil）：
+    w, h = comp.dims_at_rotation(rot)                 # 宽高随旋转交换
+    gx2 = gx1 + ceil(w / CELL_SIZE)
+    gy2 = gy1 + ceil(h / CELL_SIZE)
     action = (comp_id, gx1, gy1, gx2, gy2, rot, lay)  → env.step()
 ```
 
@@ -906,7 +926,7 @@ self.area_ranks = {
 | `rot` | 选旋转 | `Discrete` | `0~3` → `{0°, 90°, 180°, 270°}` |
 | `lay` | 选层 | `Discrete` | `0~1` → `{TOP, BOTTOM}` |
 
-x2、y2 自动推导：`x2 = x1 + footprint_w/CELL_SIZE`，`y2 = y1 + footprint_h/CELL_SIZE`。
+x2、y2 自动推导：先取目标旋转下的真实尺寸 `w, h = dims_at_rotation(rot)`（宽高随旋转交换），再按网格占用向上取整：`gx2 = gx1 + ceil(w/CELL_SIZE)`，`gy2 = gy1 + ceil(h/CELL_SIZE)`。碰撞/越界/reward 用**精确 mm 尺寸**（`x2 = x1 + w`），网格占用（action mask / NN 输入）用 ceil，二者分离、不互相污染。
 
 ---
 

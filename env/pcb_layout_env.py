@@ -3,6 +3,7 @@
 基于 SPEC v2.2 完整实现。支持 pending 状态观测扩展与每步 1D 掩码。
 """
 import logging
+import math
 from typing import Tuple, Dict, List, Optional
 
 import gymnasium as gym
@@ -356,25 +357,23 @@ class PCBLayoutEnv(gym.Env):
         if component.id in self.placed_list:
             return self._invalid_action("component already placed")
 
-        # 3. 网格坐标 → mm 坐标
+        # 3. 网格坐标 → mm 坐标（仅定 x1/y1；x2/y2 用目标旋转下的精确尺寸推导）
         x1 = self.valid_area[0] + gx1 * Config.CELL_SIZE
         y1 = self.valid_area[1] + gy1 * Config.CELL_SIZE
-        x2 = self.valid_area[0] + gx2 * Config.CELL_SIZE
-        y2 = self.valid_area[1] + gy2 * Config.CELL_SIZE
+        # 精确 bbox：用 dims_at_rotation(rot) 的真实尺寸，绝不用网格重建 x2/y2，
+        # 否则 int() 向下取整会把碰撞框缩小（真实 3.95mm → 3.8mm）。
+        target_w, target_h = component.dims_at_rotation(rot_idx)
+        x2 = x1 + target_w
+        y2 = y1 + target_h
 
-        # 确保 x2 >= x1, y2 >= y1
-        if x1 > x2:
-            x1, x2 = x2, x1
-        if y1 > y2:
-            y1, y2 = y2, y1
-
-        # 4. AABB 尺寸校验
+        # 4. AABB 尺寸校验（校验 action 的网格尺寸，非精确尺寸）
         # 容差 = CELL_SIZE：网格离散化最大误差 ≈ CELL_SIZE，必须不小于此值
-        # 否则非整数 footprint（如 2.9、1.6mm）始终无法通过校验
-        placed_w = x2 - x1
-        placed_h = y2 - y1
-        if abs(placed_w - component.footprint_w) > Config.CELL_SIZE or \
-           abs(placed_h - component.footprint_h) > Config.CELL_SIZE:
+        # 否则非整数 footprint（如 2.9、1.6mm）始终无法通过校验。
+        # 精确 bbox 由 target_w/h 直接构造恒满足；此处防非法 gx2/gy2。
+        placed_w = (gx2 - gx1) * Config.CELL_SIZE
+        placed_h = (gy2 - gy1) * Config.CELL_SIZE
+        if abs(placed_w - target_w) > Config.CELL_SIZE or \
+           abs(placed_h - target_h) > Config.CELL_SIZE:
             return self._invalid_action("AABB size mismatch with footprint")
 
         # 5. 更新元件状态
@@ -541,10 +540,14 @@ class PCBLayoutEnv(gym.Env):
     def _assemble_action(self) -> Tuple[int, ...]:
         """将 pending 状态组装为完整的 7 元动作。"""
         comp = self.movable_list[self._pending_comp_idx]
-        expected_w = max(1, int(comp.footprint_w / Config.CELL_SIZE))
-        expected_h = max(1, int(comp.footprint_h / Config.CELL_SIZE))
-        gx2 = self._pending_gx1 + expected_w
-        gy2 = self._pending_gy1 + expected_h
+        # 网格占用按【目标旋转】下的精确宽高向上取整（ceil）推导 gx2/gy2：
+        #  - 宽高随旋转交换（dims_at_rotation），不能再用固定 footprint_w/h
+        #  - ceil 保证网格覆盖真实封装尺寸，碰撞框不缩小
+        target_w, target_h = comp.dims_at_rotation(self._pending_rot)
+        grid_w = max(1, math.ceil(target_w / Config.CELL_SIZE))
+        grid_h = max(1, math.ceil(target_h / Config.CELL_SIZE))
+        gx2 = self._pending_gx1 + grid_w
+        gy2 = self._pending_gy1 + grid_h
         return (
             self._pending_comp_idx,
             self._pending_gx1,

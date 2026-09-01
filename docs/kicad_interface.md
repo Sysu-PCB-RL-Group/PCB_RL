@@ -57,12 +57,15 @@ class Component:
     is_placed: bool                                  # 是否已放置（初始 = is_fixed）
     nets: List[str]                                  # 连接的 net_id 列表
     pins: List[Tuple[str, float, float]]             # [(pin_number, rel_x, rel_y), ...]
-    footprint_w: float                               # 封装原始宽度 mm（0° rotation）
-    footprint_h: float                               # 封装原始高度 mm（0° rotation）
+    footprint_w: float                               # 源姿态下的 AABB 宽度 mm（非 0° 尺寸）
+    footprint_h: float                               # 源姿态下的 AABB 高度 mm
+    source_rotation: int                             # 源文件中的旋转（0-3），footprint_w/h 的测量姿态
+    source_bbox: Tuple[float, float, float, float]   # 源姿态 AABB（导入时），与 footprint_w/h 一致（不可变）
+    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]]  # r∈0..3 各 pad 相对该旋转 bbox 中心的偏移
 
     @property
     def footprint_area(self) -> float:
-        """封装面积 (mm²)"""
+        """封装面积 (mm²)（源姿态下的面积，旋转不改变面积）"""
         return self.footprint_w * self.footprint_h
 
     @property
@@ -70,6 +73,22 @@ class Component:
         """从 AABB 推导中心点 (mm)"""
         return ((self.bbox[0] + self.bbox[2]) / 2.0,
                 (self.bbox[1] + self.bbox[3]) / 2.0)
+
+    def dims_at_rotation(self, target_rotation: int) -> Tuple[float, float]:
+        """目标旋转下的 AABB 宽高：相对 source_rotation 的 delta 为奇数时交换宽高。"""
+        delta = (target_rotation - self.source_rotation) % 4
+        if delta % 2 == 0:
+            return self.footprint_w, self.footprint_h
+        return self.footprint_h, self.footprint_w
+
+    def pin_abs_positions(self, rotation: Optional[int] = None) -> List[Tuple[str, float, float]]:
+        """指定（或当前）旋转下各引脚的绝对坐标：bbox 中心 + 该旋转预计算偏移。"""
+        if rotation is None:
+            rotation = self.rotation
+        cx, cy = self.center
+        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        return [(num, cx + ox, cy + oy)
+                for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)]
 ```
 
 #### 字段导入来源映射
@@ -79,19 +98,22 @@ class Component:
 | `id` | `str` | `fp.GetReference()` | 参考编号 |
 | `footprint` | `str` | `fp.GetFPID().GetLibItemName()` | 封装库项名称 |
 | `package_type` | `int` | `_classify_package_type(footprint)` | 通过关键字匹配（见 §2.3） |
-| `bbox` | `(x1,y1,x2,y2)` | `fp.GetBoundingBox()` + `pcbnew.ToMM()` | AABB 包围盒 mm，当前位置 |
+| `bbox` | `(x1,y1,x2,y2)` | `fp.GetBoundingHull().BBox()` + `pcbnew.ToMM()` | 源姿态 AABB 包围盒 mm（含旋转，与导出层一致） |
 | `rotation` | `int` | `fp.GetOrientationDegrees() // 90 % 4` | 0/1/2/3 编码 |
 | `layer` | `int` | `pcbnew.LayerName(fp.GetLayer())` | "F.Cu"→0, "B.Cu"→1, 其他→2 |
 | `is_fixed` | `bool` | `fp.IsLocked()` | 固定元件不可移动 |
 | `is_placed` | `bool` | 初始值 = `is_fixed` | 固定元件视为"已放置" |
 | `nets` | `List[str]` | 遍历 pad netcode 回填 | 由 `_cache_nets()` 填充 |
-| `pins` | `[(pin, rx, ry)]` | `fp.Pads()` → `pad.GetPosition()` | **相对 AABB 左下角**的偏移 mm |
-| `footprint_w` | `float` | `pcbnew.ToMM(bbox.GetWidth())` | 0° rotation 原始宽度 |
-| `footprint_h` | `float` | `pcbnew.ToMM(bbox.GetHeight())` | 0° rotation 原始高度 |
+| `pins` | `[(pin, rx, ry)]` | `fp.Pads()` → `pad.GetPosition()` | **相对源姿态 AABB 左上角**的偏移 mm |
+| `footprint_w` | `float` | `pcbnew.ToMM(hull.GetWidth())` | 源姿态 AABB 宽度（非 0° 尺寸） |
+| `footprint_h` | `float` | `pcbnew.ToMM(hull.GetHeight())` | 源姿态 AABB 高度 |
+| `source_rotation` | `int` | `fp.GetOrientationDegrees() // 90 % 4` | footprint_w/h 的测量姿态 |
+| `pin_offsets_by_rotation` | `dict` | 旋转 footprint 后读 `pad.GetPosition() - hull 中心` | 预计算 4 旋转 pad 偏移 |
 
 **关键约束**：
-- `pins` 坐标是**相对 bbox 左下角**的偏移（`rel_x = pad_x - bbox.x1, rel_y = pad_y - bbox.y1`），不是绝对坐标。
-- `footprint_w` / `footprint_h` 始终为 0° rotation 下的原始尺寸，不受当前 rotation 影响。
+- `pins` 坐标是**相对源姿态 bbox 左上角**的偏移（源姿态 = 源文件当前旋转），旋转后必须用 `pin_abs_positions(rotation)` 取绝对坐标，**不要用 `bbox[0] + rel_x`**——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
+- `footprint_w` / `footprint_h` 是**源姿态**下的 AABB 尺寸（`GetBoundingHull().BBox()`，含源文件旋转），不是 0° 原始尺寸。目标旋转下的宽高须用 `dims_at_rotation(target_rotation)`：相对 `source_rotation` 的 delta 为奇数（90°/270°）时宽高交换。
+- `bbox` 是源姿态 AABB，是**不可变快照**；RL 放置后应更新 `bbox` 为当前坐标，但 `footprint_w/h` / `source_bbox` 保持源姿态不变。
 - `nets` 字段在 `_cache_components()` 中初始为空列表，由 `_cache_nets()` 回填。
 
 ### 2.2 Net（网络）
@@ -158,11 +180,12 @@ _POWER_NET_PREFIXES = ("VCC", "VDD", "VSS", "VEE",
 cx = (x1 + x2) / 2.0
 cy = (y1 + y2) / 2.0
 
-# center → AABB (通过 footprint 尺寸)
-x1 = cx - footprint_w / 2.0
-y1 = cy - footprint_h / 2.0
-x2 = cx + footprint_w / 2.0
-y2 = cy + footprint_h / 2.0
+# center → AABB (目标旋转下的宽高，须经 dims_at_rotation 交换)
+w, h = comp.dims_at_rotation(comp.rotation)
+x1 = cx - w / 2.0
+y1 = cy - h / 2.0
+x2 = cx + w / 2.0
+y2 = cy + h / 2.0
 ```
 
 **rotation 编码**：
@@ -285,12 +308,12 @@ load_board(pcb_path)
   │     ├─ fp.GetReference()              → Component.id
   │     ├─ fp.GetFPID().GetLibItemName()  → Component.footprint
   │     ├─ _classify_package_type()       → Component.package_type
-  │     ├─ fp.GetBoundingBox() + ToMM()   → Component.bbox
-  │     ├─ fp.GetOrientationDegrees()     → Component.rotation
+  │     ├─ fp.GetBoundingHull().BBox() + ToMM() → Component.bbox / footprint_w/h
+  │     ├─ fp.GetOrientationDegrees()     → Component.rotation / source_rotation
   │     ├─ pcbnew.LayerName(fp.GetLayer()) → Component.layer
   │     ├─ fp.IsLocked()                  → Component.is_fixed
-  │     ├─ fp.Pads()                      → Component.pins
-  │     └─ bbox.GetWidth()/GetHeight()    → Component.footprint_w/h
+  │     ├─ fp.Pads()                      → Component.pins（相对源姿态 bbox 左上角）
+  │     └─ 4 旋转 mutate+restore 预计算    → Component.pin_offsets_by_rotation
   │
   ├─ _cache_nets()
   │     ├─ board.GetNetsByName().values() → 遍历所有网络

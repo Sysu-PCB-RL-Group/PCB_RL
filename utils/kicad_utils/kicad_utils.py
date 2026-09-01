@@ -73,19 +73,26 @@ class Component:
     footprint: str                                   # 封装名称
     package_type: int                                # 封装类型编码 0-4
     bbox: Tuple[float, float, float, float]          # 当前位置 AABB (x1, y1, x2, y2) mm
-    rotation: int                                    # 0=0°, 1=90°, 2=180°, 3=270°
+    rotation: int                                    # 当前旋转 0=0°, 1=90°, 2=180°, 3=270°
     layer: int                                       # 0=TOP, 1=BOTTOM
     is_fixed: bool                                   # 是否固定（不可移动）
     is_placed: bool                                  # 是否已放置（C1 追踪）
     nets: List[str] = field(default_factory=list)    # 连接的 net_id 列表
     pins: List[Tuple[str, float, float]] = field(default_factory=list)
-    # pins: [(pin_number, rel_x, rel_y), ...] 相对 bbox 左下角的引脚坐标 (mm)
-    footprint_w: float = 0.0                         # 封装原始宽度 mm（0° rotation）
-    footprint_h: float = 0.0                         # 封装原始高度 mm（0° rotation）
+    # pins: [(pin_number, rel_x, rel_y), ...] 相对【源姿态】bbox 左上角的引脚坐标 (mm)
+    #       源姿态 = 源文件当前旋转状态，非 0°；旋转后需用 pin_abs_positions() 取绝对坐标
+    footprint_w: float = 0.0                         # 源姿态下的 AABB 宽度 mm（非 0° 尺寸）
+    footprint_h: float = 0.0                         # 源姿态下的 AABB 高度 mm
+    source_rotation: int = 0                         # 源文件中的旋转（0-3），footprint_w/h 的测量姿态
+    source_bbox: Tuple[float, float, float, float] = field(default_factory=tuple)
+    # source_bbox: 源姿态 AABB（导入时），与 footprint_w/h 一致（不可变）
+    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]] = field(default_factory=dict)
+    # pin_offsets_by_rotation[r]: [(ox, oy), ...] 旋转 r 下各 pad 相对该旋转 bbox 中心的偏移 (mm)
+    #   顺序与 pins 一致；由 _cache_components 用真实 KiCad 几何预计算（含旋转）
 
     @property
     def footprint_area(self) -> float:
-        """封装面积 (mm²)"""
+        """封装面积 (mm²)（源姿态下的面积，旋转不改变面积）"""
         return self.footprint_w * self.footprint_h
 
     @property
@@ -93,6 +100,39 @@ class Component:
         """从 AABB 推导中心点 (mm)"""
         return ((self.bbox[0] + self.bbox[2]) / 2.0,
                 (self.bbox[1] + self.bbox[3]) / 2.0)
+
+    def dims_at_rotation(self, target_rotation: int) -> Tuple[float, float]:
+        """返回目标旋转下的 AABB 宽高 (w, h)。
+
+        footprint_w/h 是源姿态（source_rotation）下的 AABB 尺寸；
+        目标旋转相对源旋转的 delta 为奇数（90°/270°）时宽高交换，
+        偶数（0°/180°）时不交换。纯计算，不修改任何状态。
+        """
+        delta = (target_rotation - self.source_rotation) % 4
+        if delta % 2 == 0:
+            return self.footprint_w, self.footprint_h
+        return self.footprint_h, self.footprint_w
+
+    def pin_abs_positions(self, rotation: Optional[int] = None) -> List[Tuple[str, float, float]]:
+        """返回指定（或当前）旋转下各引脚的绝对坐标。
+
+        绝对位置 = 当前 bbox 中心 + 该旋转预计算的 pad 偏移。
+        引脚随旋转同步更新，与 KiCad 真实几何一致。
+
+        Args:
+            rotation: 目标旋转（0-3），默认使用 self.rotation
+
+        Returns:
+            [(pin_number, abs_x, abs_y), ...]，与 pins 顺序一致
+        """
+        if rotation is None:
+            rotation = self.rotation
+        cx, cy = self.center
+        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        return [
+            (num, cx + ox, cy + oy)
+            for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)
+        ]
 
 
 @dataclass
@@ -143,6 +183,7 @@ class KiCadUtils:
         """
         self.board: Optional[pcbnew.BOARD] = None
         self.footprints: Dict[str, pcbnew.FOOTPRINT] = {}
+        self._source_path: Optional[str] = None      # load_board 的源 PCB 路径（导出时重载模板用）
 
         self.components: Dict[str, Component] = {}
         self.nets: Dict[str, Net] = {}
@@ -167,6 +208,8 @@ class KiCadUtils:
             if self.board is None:
                 raise RuntimeError(f"pcbnew.LoadBoard returned None (file not found or invalid format)")
 
+            self._source_path = os.path.abspath(pcb_path)
+
             self.components.clear()
             self.nets.clear()
 
@@ -182,17 +225,16 @@ class KiCadUtils:
             print(f"[FAIL] load pcb file: {e}")
             return False
 
-    def _cache_footprints(self):
-        """缓存所有 footprint 对象。
+    @staticmethod
+    def _index_footprints_by_ref(board) -> Dict[str, Any]:
+        """按参考编号建立 footprint 索引，处理空 Reference 兜底与重名去重。
 
-        遍历 board.Footprints()，以参考编号为 key 存入 self.footprints 字典。
-        EasyEDA 转换文件 Reference 可能为空，此时用库项名兜底并去重。
-        同时存一份按遍历顺序的 ref 列表，供 _cache_nets 索引匹配。
+        与 _cache_footprints / export_layout 共享同一套 ref 修正逻辑，
+        保证导出时从重载模板索引到的 ref 与 load_board 时一致。
         """
-        self.footprints.clear()
-        self._fp_refs = []  # 按遍历顺序保存修正后的 ref
+        result: Dict[str, pcbnew.FOOTPRINT] = {}
         counter = 0
-        for fp in self.board.Footprints():
+        for fp in board.Footprints():
             ref = fp.GetReference()
             if not ref:
                 # EasyEDA 转换文件 Reference 为空 → 用库项名兜底
@@ -203,11 +245,21 @@ class KiCadUtils:
                     ref = f"UNK_{counter}"
             # 确保唯一（多个同型号元件 LibraryItemName 可能重复）
             base = ref
-            while ref in self.footprints:
+            while ref in result:
                 counter += 1
                 ref = f"{base}_{counter}"
-            self.footprints[ref] = fp
-            self._fp_refs.append(ref)
+            result[ref] = fp
+        return result
+
+    def _cache_footprints(self):
+        """缓存所有 footprint 对象。
+
+        遍历 board.Footprints()，以参考编号为 key 存入 self.footprints 字典。
+        EasyEDA 转换文件 Reference 可能为空，此时用库项名兜底并去重。
+        同时存一份按遍历顺序的 ref 列表，供 _cache_nets 索引匹配。
+        """
+        self.footprints = self._index_footprints_by_ref(self.board)
+        self._fp_refs = list(self.footprints.keys())  # 按遍历顺序保存修正后的 ref
 
     def _cache_components(self):
         """缓存所有元器件信息（AABB-based，含封装类型编码）。
@@ -243,26 +295,29 @@ class KiCadUtils:
                 if not pad_nets:
                     is_fixed = True
 
-            # 封装尺寸（bbox）
-            bbox = fp.GetBoundingBox()                           # pcbnew.BOX2I
-            fp_w = pcbnew.ToMM(bbox.GetWidth())
-            fp_h = pcbnew.ToMM(bbox.GetHeight())
+            # 封装尺寸（bbox）——统一用 GetBoundingHull().BBox()（含旋转、与导出层一致）。
+            # 注意：GetBoundingBox() 是缓存，SetOrientationDegrees 后不刷新；
+            #       GetBoundingHull().BBox() 实时反映旋转后的真实几何（export 亦用它定位）。
             # AABB: (x1=left, y1=top, x2=right, y2=bottom)
             # 注意：KiCad 坐标系 Y 轴向下，GetTop() 的 y 值 < GetBottom()，
             # 为满足下游 bbox 统一约定 y1 < y2，这里 y1 取 GetTop（小值）、
             # y2 取 GetBottom（大值）。
+            hull = fp.GetBoundingHull().BBox()
+            fp_w = pcbnew.ToMM(hull.GetWidth())
+            fp_h = pcbnew.ToMM(hull.GetHeight())
             bbox_mm = (
-                pcbnew.ToMM(bbox.GetLeft()),
-                pcbnew.ToMM(bbox.GetTop()),
-                pcbnew.ToMM(bbox.GetRight()),
-                pcbnew.ToMM(bbox.GetBottom()),
+                pcbnew.ToMM(hull.GetLeft()),
+                pcbnew.ToMM(hull.GetTop()),
+                pcbnew.ToMM(hull.GetRight()),
+                pcbnew.ToMM(hull.GetBottom()),
             )
 
             # 封装类型编码
             package_type = self._classify_package_type(footprint_name)
 
-            # 引脚信息（相对 AABB 左上角：x 基准=left，y 基准=top）
-            # 下游用 abs_y = bbox[1] + rel_y 恢复绝对坐标，故基准虽变但绝对值不变
+            # 引脚信息（相对源姿态 bbox 左上角：x 基准=left，y 基准=top）。
+            # 下游取绝对坐标须经 pin_abs_positions()（随旋转更新），不要直接用
+            # bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
             pins = []
             for pad in fp.Pads():
                 pad_pos_nm = pad.GetPosition()
@@ -273,6 +328,32 @@ class KiCadUtils:
                 rel_x = pad_pos_mm[0] - bbox_mm[0]
                 rel_y = pad_pos_mm[1] - bbox_mm[1]
                 pins.append((pad.GetNumber(), rel_x, rel_y))
+
+            # 预计算 4 个旋转下各 pad 相对该旋转 bbox 中心的偏移（真实 KiCad 几何）。
+            # 方法：临时设置 footprint 旋转 → 读 hull bbox 中心与 pad 世界坐标
+            #       （PAD::GetPosition() 随父 footprint 变换更新）→ 计算偏移 →
+            #       finally 恢复源姿态。源姿态的 bbox/旋转在恢复后不变。
+            pin_offsets_by_rotation = {}
+            _saved_rot = fp.GetOrientationDegrees()
+            _saved_pos = fp.GetPosition()
+            _saved_layer = fp.GetLayer()
+            try:
+                for r in range(4):
+                    fp.SetOrientationDegrees(float(r * 90))
+                    h = fp.GetBoundingHull().BBox()
+                    # Y 轴向下，GetBottom() > GetTop()；中心取两者中值即可
+                    hcx_nm = (h.GetLeft() + h.GetRight()) / 2.0
+                    hcy_nm = (h.GetTop() + h.GetBottom()) / 2.0
+                    offsets = []
+                    for pad in fp.Pads():
+                        p = pad.GetPosition()
+                        offsets.append((pcbnew.ToMM(p.x - hcx_nm),
+                                        pcbnew.ToMM(p.y - hcy_nm)))
+                    pin_offsets_by_rotation[r] = offsets
+            finally:
+                fp.SetOrientationDegrees(_saved_rot)
+                fp.SetPosition(_saved_pos)
+                fp.SetLayer(_saved_layer)
 
             self.components[reference] = Component(
                 id=reference,
@@ -287,6 +368,9 @@ class KiCadUtils:
                 pins=pins,
                 footprint_w=fp_w,
                 footprint_h=fp_h,
+                source_rotation=rotation,
+                source_bbox=bbox_mm,
+                pin_offsets_by_rotation=pin_offsets_by_rotation,
             )
 
     @staticmethod
@@ -474,33 +558,37 @@ class KiCadUtils:
     ) -> bool:
         """将 RL 优化后的布局导出为 KiCad PCB 文件。
 
-        从 self.board（缓存的完整 PCB）中找到对应 footprint，
+        **每次导出都重新加载一份独立源模板**，应用 RL 状态后保存，绝不修改
+        缓存的 self.board。这样 final/best 多次导出互不污染，相同输入恒得
+        相同输出，restore_initial_state() 也不依赖导出的副作用。
+
         只改位置/旋转/层，其余（走线、敷铜、丝印、3D 模型等）全部保留。
 
         Args:
             output_path: 输出 PCB 文件路径（.kicad_pcb 格式）
             components: RL 优化后的元件数据 {ref: Component}
-            template_path: 模板路径，None 则使用 self.board
+            template_path: 模板路径，None 则使用 load_board 时的源 PCB 路径
 
         Returns:
             True 导出成功，False 导出失败
         """
         try:
-            board = self.board
-            # 模板 footprint 独立存储，避免污染 self.footprints
-            # （若后续调用 restore_initial_state()，需基于原始 board 的 footprints）
-            template_fps = None
-            if template_path is not None:
-                board = pcbnew.LoadBoard(template_path)
-                template_fps = {}
-                for fp in board.Footprints():
-                    template_fps[fp.GetReference()] = fp
+            source = template_path or getattr(self, "_source_path", None)
+            if source is None:
+                print("[FAIL] Layout export error: no source path (call load_board first)")
+                return False
+            board = pcbnew.LoadBoard(source)
+            if board is None:
+                print(f"[FAIL] Layout export error: failed to load template {source}")
+                return False
+            # 与 load_board 相同的 ref 修正/去重逻辑，确保索引到正确 footprint
+            footprints = self._index_footprints_by_ref(board)
 
             for ref, comp in components.items():
                 # ① 只写 RL 放过的元件：固定 + 未放置都保持源坐标原封不动
                 if comp.is_fixed or not comp.is_placed:
                     continue
-                fp = (template_fps if template_fps is not None else self.footprints).get(ref)
+                fp = footprints.get(ref)
                 if fp is None:
                     continue
 

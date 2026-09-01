@@ -8,7 +8,7 @@
 import sys
 import logging
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from unittest import mock
 
 import numpy as np
@@ -31,9 +31,14 @@ class MockComponent:
     is_placed: bool = False
     nets: List[str] = field(default_factory=list)
     pins: List[Tuple[str, float, float]] = field(default_factory=list)
+    # pins: [(pin_number, rel_x, rel_y)] 相对 bbox 左上角（源姿态）的偏移
     # 默认值对齐 kicad_utils.Component（0.0），避免遗漏字段时产生假数据
     footprint_w: float = 0.0
     footprint_h: float = 0.0
+    source_rotation: int = 0
+    source_bbox: Tuple[float, float, float, float] = field(default_factory=tuple)
+    # 惰性构建：第一次访问 pin_abs_positions 时按 rotation 矩阵计算
+    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]] = field(default_factory=dict)
 
     @property
     def footprint_area(self) -> float:
@@ -45,6 +50,55 @@ class MockComponent:
             (self.bbox[0] + self.bbox[2]) / 2.0,
             (self.bbox[1] + self.bbox[3]) / 2.0,
         )
+
+    def dims_at_rotation(self, target_rotation: int) -> Tuple[float, float]:
+        """与 kicad_utils.Component 相同的宽高交换逻辑。"""
+        delta = (target_rotation - self.source_rotation) % 4
+        if delta % 2 == 0:
+            return self.footprint_w, self.footprint_h
+        return self.footprint_h, self.footprint_w
+
+    def _build_pin_offsets_by_rotation(self) -> Dict[int, List[Tuple[float, float]]]:
+        """由 pins（相对源 bbox 左上角）按旋转矩阵生成 4 旋转的相对偏移。
+
+        与真实 KiCad 的旋转约定一致（+90°：视觉逆时针，Y 轴向下）。
+        rotation=0 时退化为旧公式 bbox[0]+rel_x，保证既有测试兼容。
+        """
+        src_w = self.source_bbox[2] - self.source_bbox[0] if self.source_bbox else \
+            (self.bbox[2] - self.bbox[0])
+        src_h = self.source_bbox[3] - self.source_bbox[1] if self.source_bbox else \
+            (self.bbox[3] - self.bbox[1])
+        result: Dict[int, List[Tuple[float, float]]] = {}
+        for r in range(4):
+            delta = (r - self.source_rotation) % 4
+            offsets = []
+            for _num, rel_x, rel_y in self.pins:
+                dx = rel_x - src_w / 2.0   # 源姿态下相对 bbox 中心的偏移
+                dy = rel_y - src_h / 2.0
+                if delta == 0:
+                    ox, oy = dx, dy
+                elif delta == 1:
+                    ox, oy = dy, -dx
+                elif delta == 2:
+                    ox, oy = -dx, -dy
+                else:
+                    ox, oy = -dy, dx
+                offsets.append((ox, oy))
+            result[r] = offsets
+        return result
+
+    def pin_abs_positions(self, rotation: Optional[int] = None) -> List[Tuple[str, float, float]]:
+        """返回指定（或当前）旋转下各引脚的绝对坐标（与真实 Component 同接口）。"""
+        if rotation is None:
+            rotation = self.rotation
+        if not self.pin_offsets_by_rotation:
+            self.pin_offsets_by_rotation = self._build_pin_offsets_by_rotation()
+        cx, cy = self.center
+        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        return [
+            (num, cx + ox, cy + oy)
+            for (num, _rx, _ry), (ox, oy) in zip(self.pins, offsets)
+        ]
 
 
 @dataclass
@@ -374,6 +428,8 @@ def load_pcb_from_json(json_path: str) -> MockKiCadUtils:
             pins=[tuple(p) for p in comp_data.get("pins", [])],
             footprint_w=comp_data.get("footprint_w", 0.0),
             footprint_h=comp_data.get("footprint_h", 0.0),
+            source_rotation=comp_data.get("source_rotation", 0),
+            source_bbox=tuple(comp_data.get("source_bbox", comp_data.get("bbox", (0.0, 0.0, 0.0, 0.0)))),
         )
         kicad.components[comp.id] = comp
 

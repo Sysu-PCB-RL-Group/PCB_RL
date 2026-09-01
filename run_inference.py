@@ -10,6 +10,7 @@ import glob
 
 import json
 import logging
+import math
 import time
 from typing import List, Tuple, Dict, Optional
 
@@ -163,9 +164,11 @@ def _clamp_action_to_board(env, comp_idx: int, gx1: int, gy1: int, gx2: int, gy2
     # 3. mm → 网格
     new_gx1 = max(0, int(round((x1 - env.valid_area[0]) / Config.CELL_SIZE)))
     new_gy1 = max(0, int(round((y1 - env.valid_area[1]) / Config.CELL_SIZE)))
-    # gx2/gy2 从 footprint + 新原点重新推导，保持宽高一致
-    gw = max(1, int(comp.footprint_w / Config.CELL_SIZE))
-    gh = max(1, int(comp.footprint_h / Config.CELL_SIZE))
+    # gx2/gy2 从目标旋转的真实尺寸 + 新原点重新推导，保持宽高一致。
+    # 宽高随旋转交换（dims_at_rotation），网格占用向上取整 ceil（不能 int 缩小）
+    target_w, target_h = comp.dims_at_rotation(rot)
+    gw = max(1, math.ceil(target_w / Config.CELL_SIZE))
+    gh = max(1, math.ceil(target_h / Config.CELL_SIZE))
     new_gx2 = new_gx1 + gw
     new_gy2 = new_gy1 + gh
 

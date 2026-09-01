@@ -39,7 +39,11 @@ class TestExportLayout:
             )
 
     def test_export_with_moved_component(self, kicad_pcb_path):
-        """移动元件后导出，再加载验证位置已更新。"""
+        """移动元件后导出，再加载验证位置已更新。
+
+        注意：export_layout 只写 is_placed=True 的元件（固定 + 未放置保持源坐标），
+        测试必须先置 is_placed=True，否则元件不会被导出。
+        """
         ki = KiCadUtils()
         ki.load_board(kicad_pcb_path)
 
@@ -49,6 +53,8 @@ class TestExportLayout:
             pytest.skip("No movable components to test")
         ref, comp = movable[0]
         orig_bbox = tuple(comp.bbox)
+        comp.is_placed = True          # 否则 export_layout 会跳过未放置元件
+        comp.layer = 0                 # 保证层守卫通过（F.Cu）
 
         # 移动元件（bbox 整体平移 10mm）
         dx, dy = 10.0, 15.0
@@ -70,6 +76,48 @@ class TestExportLayout:
                 assert diff < 0.01, (
                     f"{ref}: bbox[{i}] mismatch: {moved_comp.bbox[i]:.4f} vs {comp.bbox[i]:.4f}, diff={diff:.4f}"
                 )
+
+    def test_export_does_not_mutate_cache_board(self, kicad_pcb_path):
+        """export_layout 每次重载独立模板，不修改缓存的 self.board / self.footprints。
+
+        回归：旧实现会原地修改缓存中的 footprint 对象，导致 final/best 多次导出互相污染。
+        """
+        ki = KiCadUtils()
+        ki.load_board(kicad_pcb_path)
+
+        movable = [(ref, c) for ref, c in ki.components.items() if not c.is_fixed]
+        if not movable:
+            pytest.skip("No movable components to test")
+        ref, comp = movable[0]
+        orig_bbox = tuple(comp.bbox)
+        comp.is_placed = True
+        comp.layer = 0
+        # 修改 RL 状态（bbox 平移 10mm）——只应影响导出，不应动缓存 board
+        comp.bbox = (orig_bbox[0] + 10, orig_bbox[1], orig_bbox[2] + 10, orig_bbox[3])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p1 = os.path.join(tmpdir, "a.kicad_pcb")
+            p2 = os.path.join(tmpdir, "b.kicad_pcb")
+            assert ki.export_layout(p1, ki.components)
+            assert ki.export_layout(p2, ki.components)
+
+            # 缓存中的 footprint 仍应在原始位置（hull 中心 == 原始 bbox 中心）
+            import pcbnew  # noqa: E402 — 由 conftest 保证可用
+            fp = ki.footprints.get(ref)
+            assert fp is not None
+            h = fp.GetBoundingHull().BBox()
+            hcx = pcbnew.ToMM((h.GetLeft() + h.GetRight()) / 2.0)
+            hcy = pcbnew.ToMM((h.GetTop() + h.GetBottom()) / 2.0)
+            orig_cx = (orig_bbox[0] + orig_bbox[2]) / 2.0
+            orig_cy = (orig_bbox[1] + orig_bbox[3]) / 2.0
+            assert abs(hcx - orig_cx) < 0.05, (
+                f"缓存 board 被污染: hull 中心 x {hcx:.4f} != 原始 {orig_cx:.4f}"
+            )
+            assert abs(hcy - orig_cy) < 0.05
+
+            # 两次导出确定性一致（相同输入恒得相同输出）
+            with open(p1, "rb") as f1, open(p2, "rb") as f2:
+                assert f1.read() == f2.read(), "多次导出应互不污染、输出一致"
 
     def test_export_does_not_lose_fixed_components(self, kicad_pcb_path):
         """导出不应丢失固定元件。"""
