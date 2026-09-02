@@ -44,3 +44,6 @@ Thumbs.db
 
 # CodeBuddy local data
 .codebuddy/
+
+# Generated expert trajectories (regenerable, do not commit)
+data/expert_transitions/
