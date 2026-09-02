@@ -165,8 +165,8 @@ def test_is_legal_placement():
     """
     valid_area = (0.0, 0.0, 100.0, 80.0)
     snapshot = {
-        "A": {"bbox": (10, 10, 20, 20), "is_placed": True, "package_type": 0},
-        "B": {"bbox": (30, 10, 40, 20), "is_placed": True, "package_type": 0},
+        "A": {"bbox": (10, 10, 20, 20), "is_placed": True, "package_type": 0, "layer": 0},
+        "B": {"bbox": (30, 10, 40, 20), "is_placed": True, "package_type": 0, "layer": 0},
     }
 
     # 越界（右边界超出）
@@ -203,8 +203,8 @@ def test_is_legal_placement_global_check():
     valid_area = (0.0, 0.0, 100.0, 80.0)
     # B 尚未放置（is_placed=False），但全局检查不应跳过它
     snapshot = {
-        "A": {"bbox": (10, 10, 20, 20), "is_placed": True, "package_type": 0},
-        "B": {"bbox": (35, 10, 45, 20), "is_placed": False, "package_type": 0},
+        "A": {"bbox": (10, 10, 20, 20), "is_placed": True, "package_type": 0, "layer": 0},
+        "B": {"bbox": (35, 10, 45, 20), "is_placed": False, "package_type": 0, "layer": 0},
     }
     # 候选与尚未放置的 B 硬重叠 → 必须拦截
     assert not ExpertTrajectoryGenerator._is_legal_placement(
@@ -265,7 +265,7 @@ def test_generated_transitions_no_negative_reward():
     all_transitions = []
     for _ in range(20):
         chain = generator.decompose_backward(env)
-        all_transitions.extend(generator.trajectory_to_transitions(env, chain))
+        all_transitions.extend(generator.trajectory_to_transitions(env, chain)[0])
 
     n_negative = sum(1 for t in all_transitions if t[2] < 0.0)
     assert n_negative == 0, \
@@ -359,7 +359,7 @@ def test_trajectory_uses_quantized_bbox():
     )
 
     chain = generator.decompose_backward(env)
-    transitions = generator.trajectory_to_transitions(env, chain)
+    transitions = generator.trajectory_to_transitions(env, chain)[0]
 
     va = env.valid_area
     cell = Config.CELL_SIZE
@@ -396,7 +396,7 @@ def test_trajectory_to_transitions():
     )
 
     chain = generator.decompose_backward(env)
-    transitions = generator.trajectory_to_transitions(env, chain)
+    transitions = generator.trajectory_to_transitions(env, chain)[0]
 
     # 每条轨迹 = N_movable × 5 子步骤
     expected_count = env.N_movable * 5
@@ -443,7 +443,7 @@ def test_save_load_transitions():
     )
 
     chain = generator.decompose_backward(env)
-    transitions = generator.trajectory_to_transitions(env, chain)
+    transitions = generator.trajectory_to_transitions(env, chain)[0]
 
     with tempfile.TemporaryDirectory() as tmpdir:
         generator.save_transitions(transitions, tmpdir, "test.kicad_pcb")
@@ -481,7 +481,7 @@ def test_expert_replay_buffer():
     )
 
     chain = generator.decompose_backward(env)
-    transitions = generator.trajectory_to_transitions(env, chain)
+    transitions = generator.trajectory_to_transitions(env, chain)[0]
     n_expert = len(transitions)
 
     # 创建 buffer
@@ -533,7 +533,7 @@ def test_bc_pretrain_loss_decrease():
     )
 
     chain = generator.decompose_backward(env)
-    transitions = generator.trajectory_to_transitions(env, chain)
+    transitions = generator.trajectory_to_transitions(env, chain)[0]
 
     # 创建 Agent
     device = torch.device("cpu")
@@ -593,6 +593,47 @@ def test_generate_and_save():
     )
 
 
+# ===================== 测试 9: raw 轨迹缓存结构 =====================
+
+def test_raw_trajectory_cache():
+    """验证便捷函数同时产出 raw 轨迹缓存，且结构符合 schema。
+
+    raw 轨迹每步含 comp_id / target / base / mut_type / reward_full；
+    轨迹级含 shift 与 total_reward（== sum(reward_full)）。
+    """
+    env = create_patched_env()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        generate_and_save_expert_transitions(
+            env=env,
+            pcb_name="test_mock.kicad_pcb",
+            output_dir=tmpdir,
+            total_transitions=60,
+            epsilon_decompose=1.0,
+            pos_noise_prob=0.3,
+            rot_noise_prob=0.2,
+        )
+        raw_path = os.path.join(tmpdir, "test_mock_expert_raw.json")
+        assert os.path.isfile(raw_path), f"Raw cache not created: {raw_path}"
+        raw = ExpertTrajectoryGenerator.load_raw_trajectories(raw_path)
+        assert len(raw) > 0
+
+        for traj in raw:
+            assert "shift" in traj and len(traj["shift"]) == 2
+            assert "steps" in traj and len(traj["steps"]) == env.N_movable
+            assert "total_reward" in traj
+            # total_reward 必须等于各步 reward_full 之和（拆分前完整 reward）
+            assert abs(traj["total_reward"]
+                       - sum(s["reward_full"] for s in traj["steps"])) < 1e-6
+            for s in traj["steps"]:
+                assert s["comp_id"]
+                assert set(s["target"].keys()) == {"bbox", "rotation", "layer"}
+                assert set(s["base"].keys()) == {"bbox", "rotation", "layer"}
+                assert s["mut_type"] in ("none", "pos", "rot", "both")
+                assert isinstance(s["reward_full"], float)
+
+    logger.info("test_raw_trajectory_cache: PASSED")
+
+
 # ===================== 运行全部测试 =====================
 
 if __name__ == "__main__":
@@ -607,5 +648,6 @@ if __name__ == "__main__":
     test_expert_replay_buffer()
     test_bc_pretrain_loss_decrease()
     test_generate_and_save()
+    test_raw_trajectory_cache()
     logger.info("=" * 50)
     logger.info("All expert trajectory tests PASSED!")

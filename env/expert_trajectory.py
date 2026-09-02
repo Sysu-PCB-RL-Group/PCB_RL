@@ -31,6 +31,10 @@ DEFAULT_EPSILON_DECOMPOSE = 0.5
 DEFAULT_POS_NOISE_PROB = 0.2
 DEFAULT_ROT_NOISE_PROB = 0.1
 
+# 专家轨迹与训练侧 run.py 共用的 5 步 reward 拆分权重（唯一事实来源）。
+# 禁止在本地重新硬编码，否则两者标准会静默分叉（见 Req2 一致性审查）。
+EXPERT_SHARE_WEIGHTS = [0.2, 0.3, 0.3, 0.1, 0.1]
+
 
 # ===================== 专家轨迹生成器 =====================
 
@@ -265,10 +269,14 @@ class ExpertTrajectoryGenerator:
                 return False
 
         self_pkg = snapshot[comp_id].get("package_type", 0)
+        self_layer = snapshot[comp_id]["layer"]  # 必须存在；缺失即抛 KeyError 暴露数据错误
 
         # 全局检查：遍历所有元件（含尚未放置者），跳过自身
         for other_id, other_state in snapshot.items():
             if other_id == comp_id:
+                continue
+            # 异层元件物理被板材隔开，不计碰撞（修复：碰撞前提为同层）
+            if not PCBUtils.layers_conflict(self_layer, other_state["layer"], Config.ENABLE_DUAL_SIDED):
                 continue
             other_bbox = other_state["bbox"]
             other_pkg = other_state.get("package_type", 0)
@@ -285,7 +293,8 @@ class ExpertTrajectoryGenerator:
         self,
         env,
         reverse_chain: List[Tuple[str, dict]],
-    ) -> List[Tuple]:
+        shift: Tuple[float, float] = (0.0, 0.0),
+    ) -> Tuple[List[Tuple], dict]:
         """将反向拆解链反转为正向轨迹，并按 5 步子步骤拆为 transition。
 
         Args:
@@ -302,6 +311,11 @@ class ExpertTrajectoryGenerator:
         # 即第 i 步放置 comp_id 后，得到 snapshot_after_placement 状态
 
         transitions = []
+        raw_trajectory = {
+            "shift": [float(shift[0]), float(shift[1])],
+            "steps": [],
+            "total_reward": 0.0,
+        }
 
         # 重置环境到空板状态
         env.reset()
@@ -387,11 +401,41 @@ class ExpertTrajectoryGenerator:
             ]
 
             # 生成 5 步子步骤 transition
-            step_transitions = self._build_step_transitions(
+            step_transitions, expert_reward = self._build_step_transitions(
                 env, comp_idx, expert_actions, step_idx,
             )
 
             transitions.extend(step_transitions)
+
+            # ---- 记录 raw 轨迹步骤（未变异基准 / 变异类型 / 拆分前完整 reward） ----
+            _, _, base_quant_bbox = self._quantize_bbox_to_grid(env, base_bbox)
+            pos_mutated = target_bbox != base_quant_bbox
+            rot_mutated = target_rotation != base_rotation
+            if pos_mutated and rot_mutated:
+                mut_type = "both"
+            elif pos_mutated:
+                mut_type = "pos"
+            elif rot_mutated:
+                mut_type = "rot"
+            else:
+                mut_type = "none"
+            raw_trajectory["steps"].append({
+                "comp_id": comp_id,
+                "target": {
+                    "bbox": [float(v) for v in target_bbox],
+                    "rotation": int(target_rotation),
+                    "layer": int(target_layer),
+                },
+                "base": {
+                    "bbox": [float(v) for v in base_quant_bbox],
+                    "rotation": int(base_rotation),
+                    "layer": int(comp_target["layer"]),
+                },
+                "mutated": mut_type != "none",
+                "mut_type": mut_type,
+                "reward_full": float(expert_reward),
+            })
+            raw_trajectory["total_reward"] += float(expert_reward)
 
             # 更新环境状态：放置该元件（量化坐标，与 reward/next_obs 一致）
             comp = env.movable_list[comp_idx]
@@ -407,7 +451,7 @@ class ExpertTrajectoryGenerator:
             actual_snapshot[comp_id]["layer"] = target_layer
             actual_snapshot[comp_id]["is_placed"] = True
 
-        return transitions
+        return transitions, raw_trajectory
 
     def _build_step_transitions(
         self,
@@ -468,8 +512,8 @@ class ExpertTrajectoryGenerator:
         # 计算专家 reward（复用环境完整 reward，含品质项，标准与训练一致）
         expert_reward = self._compute_expert_reward(env, comp_idx, expert_actions)
 
-        # 按 share_weights 分配到各子步骤
-        share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]
+        # 按 share_weights 分配到各子步骤（与 run.py 共用 EXPERT_SHARE_WEIGHTS）
+        share_weights = EXPERT_SHARE_WEIGHTS
         obs_list = [obs0, obs1, obs2, obs3, obs4]
         actions = [action0, action1, action2, action3, action4]
         masks = [mask0, mask1, mask2, mask3, mask4]
@@ -514,7 +558,7 @@ class ExpertTrajectoryGenerator:
                 next_sid,
             ))
 
-        return transitions
+        return transitions, expert_reward
 
     def _compute_expert_reward(self, env, comp_idx: int, expert_actions: List[int]) -> float:
         """计算专家放置的完整 reward（与训练环境 _calculate_reward 完全一致）。
@@ -741,6 +785,7 @@ class ExpertTrajectoryGenerator:
             所有 transition 的列表（可能略超 total_transitions）
         """
         all_transitions = []
+        all_raw = []
         traj_count = 0
 
         # 先 reset 一次，确保 bbox 为原始布局，用于计算合法平移范围
@@ -767,9 +812,10 @@ class ExpertTrajectoryGenerator:
                 logger.warning(f"[{pcb_name}] traj {traj_count}: empty chain, skipping")
                 continue
 
-            # 反转 + 拆为 transition
-            transitions = self.trajectory_to_transitions(env, chain)
+            # 反转 + 拆为 transition（同时产出 raw 轨迹，含 shift/基准/变异/完整 reward）
+            transitions, raw_traj = self.trajectory_to_transitions(env, chain, shift)
             all_transitions.extend(transitions)
+            all_raw.append(raw_traj)
             traj_count += 1
 
         buffer_capacity = Config.EXPERT_BUFFER_MULTIPLIER * len(all_transitions)
@@ -778,7 +824,7 @@ class ExpertTrajectoryGenerator:
             f"{len(all_transitions)} expert transitions "
             f"(target={self.total_transitions}, buffer_capacity={buffer_capacity})"
         )
-        return all_transitions
+        return all_transitions, all_raw
 
     def save_transitions(self, transitions: List[Tuple], output_dir: str, pcb_name: str):
         """序列化专家 transition 到磁盘。
@@ -849,6 +895,41 @@ class ExpertTrajectoryGenerator:
         logger.info(f"Loaded {len(transitions)} expert transitions from {filepath}")
         return transitions
 
+    def save_raw_trajectories(self, raw_trajectories: List[dict], output_dir: str, pcb_name: str) -> str:
+        """序列化完整 6 元器件 raw 轨迹到磁盘（与 save_transitions 同目录）。
+
+        raw 轨迹每步含：comp_id、目标 bbox/旋转/层、未变异基准 base、
+        是否变异及类型（pos/rot/both/none）、拆分前完整 reward；轨迹级含全局 shift。
+
+        Args:
+            raw_trajectories: generate_all_expert_transitions 产出的 raw 轨迹列表
+            output_dir: 输出目录
+            pcb_name: PCB 文件名（用于命名）
+
+        Returns:
+            保存的文件路径
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        pcb_short = pcb_name.replace(".kicad_pcb", "")
+        filepath = os.path.join(output_dir, f"{pcb_short}_expert_raw.json")
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(raw_trajectories, f, ensure_ascii=False)
+        logger.info(f"Saved {len(raw_trajectories)} raw trajectories to {filepath}")
+        return filepath
+
+    @staticmethod
+    def load_raw_trajectories(filepath: str) -> List[dict]:
+        """从磁盘加载 raw 轨迹。
+
+        Args:
+            filepath: JSON 文件路径
+
+        Returns:
+            raw 轨迹列表（dict 结构，见 save_raw_trajectories）
+        """
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+
 
 # ==================== 便捷函数 ====================
 
@@ -885,8 +966,9 @@ def generate_and_save_expert_transitions(
         rot_noise_prob=rot_noise_prob,
     )
 
-    transitions = generator.generate_all_expert_transitions(env, pcb_name)
+    transitions, all_raw = generator.generate_all_expert_transitions(env, pcb_name)
     generator.save_transitions(transitions, output_dir, pcb_name)
+    generator.save_raw_trajectories(all_raw, output_dir, pcb_name)
 
     pcb_short = pcb_name.replace(".kicad_pcb", "")
     filepath = os.path.join(output_dir, f"{pcb_short}_expert.json")

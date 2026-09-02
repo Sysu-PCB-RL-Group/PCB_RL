@@ -93,7 +93,7 @@ def run_episode(env, agent: DQNAgent, buffer: ReplayBuffer,
         # ---- 每步 learn ----
         if buffer.is_ready(Config.BATCH_SIZE):
             batch = buffer.sample(Config.BATCH_SIZE)
-            loss = agent.learn(batch)
+            loss, _ = agent.learn(batch)
             losses.append(loss)
             if agent.train_steps % Config.TARGET_UPDATE_FREQ == 0:
                 agent.sync_target()
@@ -122,19 +122,18 @@ def test_training_pipeline():
 
     # 1. 创建 env
     env = create_patched_env()
-    obs_dim = env.N_movable * 8 + env.N_movable + 4
 
     # 2. 创建 Agent + Buffer
     device = torch.device("cpu")
     agent = DQNAgent(
-        obs_dim=obs_dim, n_movable=env.N_movable,
-        grid_w=env.grid_width, grid_h=env.grid_height,
+        n_movable=env.N_movable,
+        grid_w=Config.GRID_W, grid_h=Config.GRID_H,
         device=device,
         lr=Config.LEARNING_RATE, gamma=Config.GAMMA,
     )
     buffer = ReplayBuffer(capacity=Config.REPLAY_BUFFER_SIZE)
 
-    logger.info(f"obs_dim={obs_dim}, lr={Config.LEARNING_RATE}, gamma={Config.GAMMA}")
+    logger.info(f"n_movable={env.N_movable}, lr={Config.LEARNING_RATE}, gamma={Config.GAMMA}")
 
     # 3. 训练 loop
     rewards = []
@@ -211,8 +210,8 @@ def test_training_pipeline():
     logger.info(f"  ✅  Checkpoint saved: {ckpt_path}")
 
     agent2 = DQNAgent(
-        obs_dim=obs_dim, n_movable=env.N_movable,
-        grid_w=env.grid_width, grid_h=env.grid_height,
+        n_movable=env.N_movable,
+        grid_w=Config.GRID_W, grid_h=Config.GRID_H,
         device=device,
     )
     agent2.load(ckpt_path)
@@ -220,8 +219,11 @@ def test_training_pipeline():
     logger.info(f"  ✅  Checkpoint load: train_steps={agent2.train_steps}")
 
     # 验证预测输出一致性（所有权重应完全相同）
-    dummy_obs = np.random.randn(obs_dim).astype(np.float32)
-    dummy_t = torch.tensor(dummy_obs).unsqueeze(0).to(device)
+    dummy_obs = {
+        "component_slots": np.random.randn(1, env.N_movable, 8).astype(np.float32),
+        "global_features": np.random.randn(1, 8).astype(np.float32),
+    }
+    dummy_t = {k: torch.tensor(v).to(device) for k, v in dummy_obs.items()}
     agent.q_net.eval()
     agent2.q_net.eval()
     for sid in range(5):

@@ -20,7 +20,10 @@ import numpy as np
 import torch
 
 from env.pcb_layout_env import PCBLayoutEnv, Config
-from env.expert_trajectory import generate_and_save_expert_transitions
+from env.expert_trajectory import (
+    generate_and_save_expert_transitions,
+    EXPERT_SHARE_WEIGHTS,
+)
 from dqn import DQNAgent
 from dqn.replay_buffer import ReplayBuffer, ExpertReplayBuffer
 
@@ -84,18 +87,30 @@ class Runner:
 
         # ---- Per-board 独立统计 ----
         self.per_board_episode: dict[str, int] = {}       # {pcb_name: ep_count}
-        self.per_board_best_reward: dict[str, float] = {} # {pcb_name: best_r}
+        self.per_board_best_reward: dict[str, float] = {} # {pcb_name: 最佳干净终局分(clean)}
         self.per_board_best_state: dict[str, dict] = {}   # {pcb_name: snapshot}
         self.per_board_best_episode: dict[str, int] = {}  # {pcb_name: best_ep}
-        self.per_board_rewards: dict[str, list] = {}      # {pcb_name: [r1, r2, ...]}
+        self.per_board_rewards: dict[str, list] = {}      # {pcb_name: [r1, r2, ...]} 惩罚版
         self.per_board_placed: dict[str, list] = {}       # {pcb_name: [p1, p2, ...]}
         self.per_board_loss_history: dict[str, list] = {} # {pcb_name: [(ep, loss), ...]}
-        self.per_board_reward_history: dict[str, list] = {} # {pcb_name: [(ep, reward), ...]}
+        self.per_board_reward_history: dict[str, list] = {} # {pcb_name: [(ep, reward), ...]} 惩罚版
+        # 干净终局分序列：[(ep, clean_r), ...]，口径=evaluate_final_layout（与推理评测一致）
+        self.per_board_clean_history: dict[str, list] = {}
+        self._clean_metric_warned: bool = False           # 干净分不可用时告警只打一次
 
-        # ---- 全局最佳（用于保存 best_model.pt） ----
+        # ---- 全局最佳（clean 口径，仅用于布局可视化导出，不参与 best_model 选择） ----
         self.global_best_reward: float = float("-inf")
         self.global_best_episode: int = -1
         self.global_best_pcb: str = ""
+
+        # ---- 贪心能力最佳（部署口径，用于保存 best_model.pt） ----
+        # 与 per-board clean 最佳解耦：clean 最佳只驱动布局可视化导出；
+        # 真正成为 best_model.pt 的权重由周期性贪心推理评估（eps=0.01）选出。
+        self.global_best_greedy_score: float = float("-inf")  # 主选择量 = 各板 mean completion ratio 均值
+        self.global_best_greedy_full_place_rate: float = 0.0
+        self.global_best_greedy_mean_reward: float = 0.0
+        self.global_best_greedy_episode: int = -1
+        self.global_best_greedy_per_board: dict = {}  # 选出最佳时的 per-board 明细（供汇总）
 
         # 各个 PCB 的训练统计（用于最终汇总）
         self._pcb_history: list[dict] = []
@@ -103,7 +118,8 @@ class Runner:
         # ---- 专家轨迹注入相关 ----
         self.expert_transitions_dir: str = ""
         self.expert_transitions_count: int = 0  # 专家 transition 总数
-        self.use_expert: bool = getattr(args, "use_expert", True)  # 是否启用专家注入
+        self.use_expert: bool = getattr(args, "use_expert", False)  # 是否启用专家注入（缺省=False=baseline 纯 RL）
+        self.group_label: str = "with_expert" if self.use_expert else "baseline"  # 训练组标签，用于日志/汇总自解释
 
     def run(self):
         """两阶段训练循环：Phase 1 BC 预训练 + Phase 2 RL + 专家注入。"""
@@ -116,6 +132,7 @@ class Runner:
         file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         logger.addHandler(file_handler)
         logger.info(f"Log file: {log_path}")
+        logger.info(f"Training group: {self.group_label} (use_expert={self.use_expert})")
 
         # ---- 1. 扫描全部 PCB 文件 ----
         pcb_files = self._get_pcb_files()
@@ -181,6 +198,7 @@ class Runner:
             self.per_board_placed[pcb_name] = []
             self.per_board_loss_history[pcb_name] = []
             self.per_board_reward_history[pcb_name] = []
+            self.per_board_clean_history[pcb_name] = []
 
         pcb_names = [n for n, _ in self.pcb_pool]
 
@@ -204,8 +222,16 @@ class Runner:
             agent, buffer = self._init_agent_and_buffer()
             bc_ckpt_path = os.path.join(self.save_dir, "bc_pretrained.pt")
             if os.path.isfile(bc_ckpt_path):
-                agent.load(bc_ckpt_path)
-                logger.info(f"Phase 2: loaded BC pretrained weights from {bc_ckpt_path}")
+                # baseline 组永不生成 bc_pretrained.pt：此处存在即上一轮专家训练的残留产物，
+                # 删除之以防止纯 RL 静默继承专家初始化权重（且因不调 init_bc_anchor 而不带 BC 正则，会污染控制组）。
+                os.remove(bc_ckpt_path)
+                logger.info(
+                    f"Phase 2: removed stale expert bc_pretrained.pt from {bc_ckpt_path} "
+                    f"(baseline 不加载专家权重)"
+                )
+
+        self.agent = agent  # 供周期性贪心评估（_eval_greedy_capability）使用
+        self.buffer = buffer
 
         # ---- 8. Phase 2 预热：混合探索填充 buffer（不学习） ----
         WARMUP_TOTAL = 500
@@ -245,35 +271,62 @@ class Runner:
             self.per_board_loss_history[pcb_name].append((board_ep, avg_loss))
             self.per_board_reward_history[pcb_name].append((board_ep, ep_reward))
 
-            # 检查 per-board 最佳
-            if ep_reward > self.per_board_best_reward[pcb_name]:
-                self.per_board_best_reward[pcb_name] = ep_reward
+            # ---- 干净终局分（部署质量口径）：只评 placed_list 内干净放置，与试错惩罚解耦 ----
+            clean_reward = self._eval_clean_layout(env)
+            if clean_reward is None:
+                # 新指标不可用 → 回退惩罚版判据，保证长训练不中断
+                clean_reward = ep_reward
+            else:
+                self.per_board_clean_history[pcb_name].append((board_ep, clean_reward))
+
+            # 检查 per-board 最佳（按干净终局分）
+            if clean_reward > self.per_board_best_reward[pcb_name]:
+                self.per_board_best_reward[pcb_name] = clean_reward
                 self.per_board_best_state[pcb_name] = self._snapshot_state(env)
                 self.per_board_best_episode[pcb_name] = self.episode_num
 
-            # 检查全局最佳 → 覆盖保存 best_model.pt
-            if ep_reward > self.global_best_reward:
-                self.global_best_reward = ep_reward
+            # 更新全局干净分最佳（仅作参考/兜底，best_model.pt 改由贪心评估选出）
+            if clean_reward > self.global_best_reward:
+                self.global_best_reward = clean_reward
                 self.global_best_episode = self.episode_num
                 self.global_best_pcb = pcb_name
-                ckpt_path = os.path.join(self.save_dir, "best_model.pt")
-                agent.save(ckpt_path)
-                logger.info(
-                    f"[NEW GLOBAL BEST] R={self.global_best_reward:.2f} "
-                    f"board={pcb_name} ep={self.global_best_episode} → {ckpt_path}"
-                )
 
             # target 网络同步（按 episode 计数）
             if self.episode_num % Config.TARGET_UPDATE_FREQ == 0:
                 agent.sync_target()
 
+            # ---- 周期性贪心推理评估（部署口径）→ 选出 best_model.pt ----
+            if self.episode_num % Config.GREEDY_EVAL_INTERVAL == 0:
+                saved = self._update_greedy_best(agent)
+                if saved:
+                    logger.info(
+                        f"[GREEDY BEST] ep={self.episode_num} "
+                        f"score={self.global_best_greedy_score:.3f} "
+                        f"fpr={self.global_best_greedy_full_place_rate:.2%} "
+                        f"reward={self.global_best_greedy_mean_reward:.2f}"
+                    )
+
             # 日志
-            self._log_episode(pcb_name, ep_reward, ep_steps, ep_placed, avg_loss)
+            self._log_episode(pcb_name, ep_reward, ep_steps, ep_placed, avg_loss,
+                              clean_reward=clean_reward)
 
             # 定期画 per-board loss / reward 曲线
             if board_ep % 100 == 0:
                 self._plot_loss_curve(pcb_name)
                 self._plot_reward_curve(pcb_name)
+
+        # ---- 9.5 训练结束：最终贪心兜底评估 + 回退保证 best_model.pt 存在 ----
+        # 末尾再跑一次贪心评估，捕捉训练后期可能更优的权重；
+        # 若全程贪心评估从未成功（global_best_greedy_episode 仍为 -1），
+        # 回退保存当前权重，保证 best_model.pt 必存在。
+        self._update_greedy_best(agent)
+        if self.global_best_greedy_episode < 0:
+            fallback_path = os.path.join(self.save_dir, "best_model.pt")
+            agent.save(fallback_path)
+            logger.warning(
+                f"[greedy eval] never succeeded during training; "
+                f"fallback saved current weights to {fallback_path}"
+            )
 
         # ---- 10. 训练结束：per-board 分析 & 全局汇总 ----
         for pcb_name in pcb_names:
@@ -370,7 +423,7 @@ class Runner:
             placed_count = _info.get("placed_count", 0)
 
             # ---- 写入 buffer（5 步按比例共享 reward） ----
-            share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]
+            share_weights = EXPERT_SHARE_WEIGHTS  # 与专家轨迹共用，保证标准一致
             for i, (s, a, mask, sid) in enumerate(transitions):
                 if sid < 4:
                     next_s = transitions[i + 1][0]
@@ -493,9 +546,26 @@ class Runner:
                 # 从磁盘加载已缓存的专家数据
                 from env.expert_trajectory import ExpertTrajectoryGenerator
                 transitions = ExpertTrajectoryGenerator.load_transitions(filepath)
-                logger.info(
-                    f"[{pcb_short}] Loaded {len(transitions)} expert transitions from cache"
-                )
+                # top-up：缓存条数不足目标则重生成并覆盖，保证常驻区填满、组成≈7:3
+                if len(transitions) < total_transitions:
+                    logger.info(
+                        f"[{pcb_short}] cache has {len(transitions)} < target "
+                        f"{total_transitions}, regenerating expert transitions"
+                    )
+                    transitions, _ = generate_and_save_expert_transitions(
+                        env=self.envs[pcb_name],
+                        pcb_name=pcb_name,
+                        output_dir=self.expert_transitions_dir,
+                        total_transitions=total_transitions,
+                        max_trajectories=max_trajectories,
+                        epsilon_decompose=epsilon_decompose,
+                        pos_noise_prob=pos_noise_prob,
+                        rot_noise_prob=rot_noise_prob,
+                    )
+                else:
+                    logger.info(
+                        f"[{pcb_short}] Loaded {len(transitions)} expert transitions from cache"
+                    )
             else:
                 # 实时生成
                 env = self.envs[pcb_name]
@@ -570,8 +640,9 @@ class Runner:
     ) -> Tuple[DQNAgent, ExpertReplayBuffer]:
         """Phase 2: 创建 Agent 和 ExpertReplayBuffer，加载 BC 权重。
 
-        Buffer 容量 = EXPERT_BUFFER_MULTIPLIER × 专家数
-        其中 20% 为专家经验常驻区。
+        Buffer 构成（派生口径）：总容量 = EXPERT_TOTAL_BUFFER，
+        专家常驻区 = EXPERT_TOTAL_TRANSITIONS（= 总buffer × EXPERT_BUFFER_RATIO），
+        探索区 = 总buffer − 专家区。采样对整池均匀随机。
 
         Args:
             all_expert_transitions: 全部专家 transition 列表
@@ -580,16 +651,14 @@ class Runner:
         Returns:
             (DQNAgent, ExpertReplayBuffer) 元组
         """
-        n_expert = len(all_expert_transitions)
-        buffer_multiplier = getattr(Config, "EXPERT_BUFFER_MULTIPLIER", 5)
-        expert_ratio = getattr(Config, "EXPERT_BUFFER_RATIO", 0.2)
         per_alpha = getattr(Config, "PER_ALPHA", 0.6)
         per_beta = getattr(Config, "PER_BETA_START", 0.4)
 
-        # Expert buffer 容量 = 专家数（常驻，不可覆盖）
-        # Normal buffer 容量 = (multiplier - 1) × 专家数（环形覆盖）
-        expert_capacity = n_expert
-        normal_capacity = (buffer_multiplier - 1) * n_expert
+        # 派生口径：总 buffer = EXPERT_TOTAL_BUFFER，专家常驻区 = EXPERT_TOTAL_TRANSITIONS
+        # （= 总buffer × EXPERT_BUFFER_RATIO = 70000），探索区 = 总buffer − 专家区（30000）。
+        # 与生成目标同源，保证生成数=常驻容量，消除旧三者错位。
+        expert_capacity = Config.EXPERT_TOTAL_TRANSITIONS
+        normal_capacity = Config.EXPERT_TOTAL_BUFFER - Config.EXPERT_TOTAL_TRANSITIONS
 
         # 创建 Agent
         agent = DQNAgent(
@@ -609,11 +678,10 @@ class Runner:
         else:
             logger.warning("Phase 2: BC checkpoint not found, starting from scratch")
 
-        # 创建 ExpertReplayBuffer
+        # 创建 ExpertReplayBuffer（整池均匀采样；专家区常驻，探索区环形覆盖）
         buffer = ExpertReplayBuffer(
             expert_capacity=expert_capacity,
             normal_capacity=normal_capacity,
-            expert_ratio=expert_ratio,
             per_alpha=per_alpha,
             per_beta=per_beta,
         )
@@ -623,9 +691,9 @@ class Runner:
 
         logger.info(
             f"Phase 2 setup: ExpertReplayBuffer "
-            f"(expert={expert_capacity}, normal={normal_capacity}, "
+            f"(expert_resident={expert_capacity}, explore={normal_capacity}, "
             f"total={expert_capacity + normal_capacity}, "
-            f"ratio={expert_ratio}, PER α={per_alpha}, β={per_beta})"
+            f"sample=uniform-over-pool, PER disabled, PER α={per_alpha}, β={per_beta})"
         )
 
         return agent, buffer
@@ -693,15 +761,17 @@ class Runner:
     def _log_episode(
         self, pcb_name: str, total_reward: float,
         steps: int, placed: int, loss: float,
+        clean_reward: Optional[float] = None,
     ):
         """记录单个 episode 的统计信息。
 
         Args:
             pcb_name: PCB 文件名
-            total_reward: episode 累计 reward
+            total_reward: episode 累计 reward（惩罚版，含违规试错惩罚）
             steps: 环境 step 次数
             placed: 已放置元件数
             loss: 学习 loss（0.0 表示未训练）
+            clean_reward: 干净终局分（部署质量口径）；None 表示未启用/不可用
         """
         log_interval = Config.LOG_INTERVAL
         if self.episode_num % log_interval != 0:
@@ -709,11 +779,18 @@ class Runner:
 
         epsilon = self._compute_epsilon(pcb_name)
         board_short = pcb_name.replace(".kicad_pcb", "")
+        clean_str = f"  R_clean={clean_reward:8.2f}" if clean_reward is not None else ""
+        greedy_str = (
+            f"  greedy_best={self.global_best_greedy_score:.3f}"
+            f"(fpr={self.global_best_greedy_full_place_rate:.2%},"
+            f"ep={self.global_best_greedy_episode})"
+            if self.global_best_greedy_episode >= 0 else ""
+        )
         logger.info(
             f"[Ep {self.episode_num:6d}] {board_short:30s} "
             f"({self.per_board_episode.get(pcb_name, 0):4d}@board) "
             f"R={total_reward:8.2f}  steps={steps:3d}  placed={placed:3d}  "
-            f"ε={epsilon:.3f}  loss={loss:.4f}"
+            f"ε={epsilon:.3f}  loss={loss:.4f}{clean_str}{greedy_str}"
         )
 
     def _backup_previous_results(self):
@@ -801,12 +878,147 @@ class Runner:
 
         plot_reward_curve(reward_history, png_path, pcb_name=pcb_short, window=100)
 
+        # 干净终局分曲线（部署质量口径），与惩罚版曲线并存、互不覆盖
+        clean_history = self.per_board_clean_history.get(pcb_name, [])
+        if clean_history:
+            clean_json_path = os.path.join(board_dir, "clean_reward_history.json")
+            clean_png_path = os.path.join(board_dir, "reward_curve_clean.png")
+            with open(clean_json_path, "w", encoding="utf-8") as f:
+                json.dump(clean_history, f, ensure_ascii=False)
+            plot_reward_curve(
+                clean_history, clean_png_path,
+                pcb_name=f"{pcb_short} (clean)", window=100,
+            )
+
     # ==================== 最佳布局追踪 ====================
+
+    def _eval_clean_layout(self, env: PCBLayoutEnv) -> Optional[float]:
+        """终局干净布局质量分（与推理评测 final_layout_reward 同口径）。
+
+        复用 run_inference.evaluate_final_layout：只评估 placed_list 内的干净放置，
+        与违规试错步的惩罚彻底解耦（违规步 is_placed=False 不进 placed_list）。
+        延迟导入与 _snapshot_state 同风格，避免模块级副作用。
+
+        _run_episode 在开头 reset、结尾不 reset，故此处 env 仍持有终局布局。
+
+        Args:
+            env: 当前 episode 结束后的环境
+
+        Returns:
+            干净终局质量分；不可用时返回 None（调用方回退到惩罚版 ep_reward）
+        """
+        try:
+            from run_inference import evaluate_final_layout
+            return float(evaluate_final_layout(env))
+        except Exception as exc:  # 长训练不应因新指标中断
+            if not self._clean_metric_warned:
+                logger.warning(
+                    f"[clean metric] evaluate_final_layout unavailable ({exc}); "
+                    f"falling back to penalty-based ep_reward for best-model selection"
+                )
+                self._clean_metric_warned = True
+            return None
 
     def _snapshot_state(self, env: PCBLayoutEnv) -> dict:
         """提取 env 中所有元件的完整状态快照。"""
         from run_inference import snapshot_state
         return snapshot_state(env)
+
+    def _eval_greedy_capability(self, pcb_pool: list, k: int) -> Optional[dict]:
+        """周期性贪心推理能力评估（部署口径），用于选择 best_model.pt。
+
+        对每块板用当前 agent 跑 k 次贪心推理（eps=0.01），聚合「部署成功率期望」
+        （= 各板 mean completion ratio 的均值）作为主选择量；同时记录 full_place_rate
+        与 mean reward 供日志/汇总。
+
+        复用 inference_eval.run_inference_eval（自建 env、try/finally 还原全局配置，
+        无副作用），不复制推理逻辑。整体包 try/except：单板失败跳过该板，全失败跳过本轮。
+
+        Args:
+            pcb_pool: [(pcb_name, file_path), ...]
+            k: 每块板贪心 episode 数
+
+        Returns:
+            {
+              "score": float,                 # 各板 completion_ratio.mean 的均值（主选择量）
+              "full_place_rate": float,       # 聚合完整放置率
+              "mean_reward": float,           # 聚合 mean final_layout_reward
+              "per_board": {pcb_name: {...}}, # 每板明细
+            }
+            评估失败时返回 None（调用方跳过本轮，不保存、不中断训练）
+        """
+        try:
+            from inference_eval import run_inference_eval
+        except Exception as exc:  # 模块缺失不应中断训练
+            logger.warning(f"[greedy eval] inference_eval unavailable ({exc}); skip this round")
+            return None
+
+        per_board = {}
+        scores, fprs, rwds = [], [], []
+        for pcb_name, file_path in pcb_pool:
+            try:
+                res = run_inference_eval(
+                    os.path.abspath(file_path),
+                    self.agent,
+                    n=k,
+                    inference_epsilon=0.01,
+                )
+            except Exception as exc:
+                logger.warning(f"[greedy eval] board {pcb_name} failed ({exc}); skip board")
+                continue
+            cr_mean = res["stats"]["completion_ratio"]["mean"]
+            fpr = res["stats"]["full_place_rate"]
+            rw_mean = res["stats"]["rewards"]["mean"]
+            per_board[pcb_name] = {
+                "completion_ratio_mean": float(cr_mean),
+                "full_place_rate": float(fpr),
+                "mean_reward": float(rw_mean),
+            }
+            scores.append(cr_mean)
+            fprs.append(fpr)
+            rwds.append(rw_mean)
+
+        if not scores:
+            logger.warning("[greedy eval] no board evaluated successfully; skip this round")
+            return None
+
+        return {
+            "score": float(sum(scores) / len(scores)),
+            "full_place_rate": float(sum(fprs) / len(fprs)),
+            "mean_reward": float(sum(rwds) / len(rwds)),
+            "per_board": per_board,
+        }
+
+    def _update_greedy_best(self, agent) -> bool:
+        """跑一次周期性贪心评估；若超越历史最佳则保存 best_model.pt。
+
+        主选择量 = 各板 mean completion ratio 的均值（= 部署成功率期望的连续估计），
+        比硬 full_place_rate（每轮 0/1）在小 K 下粒度更细，更适合做单调优化目标。
+        同时记录 full_place_rate 与 mean reward 供日志/汇总。
+
+        Returns:
+            True 表示本次评估刷新了全局贪心最佳并保存了权重
+        """
+        greedy = self._eval_greedy_capability(self.pcb_pool, Config.GREEDY_EVAL_K)
+        if greedy is None:
+            return False
+        score = greedy["score"]
+        if score > self.global_best_greedy_score:
+            self.global_best_greedy_score = score
+            self.global_best_greedy_full_place_rate = greedy["full_place_rate"]
+            self.global_best_greedy_mean_reward = greedy["mean_reward"]
+            self.global_best_greedy_episode = self.episode_num
+            self.global_best_greedy_per_board = greedy["per_board"]
+            ckpt_path = os.path.join(self.save_dir, "best_model.pt")
+            agent.save(ckpt_path)
+            logger.info(
+                f"[NEW GREEDY BEST] score={score:.3f} "
+                f"(fpr={greedy['full_place_rate']:.2%}, "
+                f"reward={greedy['mean_reward']:.2f}) "
+                f"ep={self.episode_num} → {ckpt_path}"
+            )
+            return True
+        return False
 
     def _export_best_layout(self, pcb_name: str, best_state: dict,
                             best_reward: float, best_episode: int):
@@ -853,17 +1065,34 @@ class Runner:
         first_n = max(1, len(rewards) // 5)
         last_n = max(1, len(rewards) // 5)
 
+        # 干净终局分统计（部署质量口径）。best_r 已是干净分——训练循环的最佳判据
+        # 已由惩罚版 ep_reward 切换为 clean_reward，见 Phase 2 训练循环。
+        clean_history = self.per_board_clean_history.get(pcb_name, [])
+        if clean_history:
+            clean_vals = [r for _, r in clean_history]
+            clean_n = max(1, len(clean_vals) // 5)
+            best_clean_r = best_r
+            first_avg_clean_r = sum(clean_vals[:clean_n]) / clean_n
+            last_avg_clean_r = sum(clean_vals[-clean_n:]) / clean_n
+        else:
+            best_clean_r = None
+            first_avg_clean_r = None
+            last_avg_clean_r = None
+
         pcb_short = pcb_name.replace(".kicad_pcb", "")
         logger.info("=" * 50)
         logger.info(f"PCB 训练完成: {pcb_short}")
         logger.info(f"  训练轮数: {len(rewards)}")
         logger.info(f"  元件数: {n_movable}")
-        logger.info(f"  前 20% 平均 R: {sum(rewards[:first_n]) / first_n:.2f}")
-        logger.info(f"  后 20% 平均 R: {sum(rewards[-last_n:]) / last_n:.2f}")
-        logger.info(f"  最终 5 轮 R: {[f'{r:.1f}' for r in rewards[-5:]]}")
+        logger.info(f"  前 20% 平均 R(惩罚版): {sum(rewards[:first_n]) / first_n:.2f}")
+        logger.info(f"  后 20% 平均 R(惩罚版): {sum(rewards[-last_n:]) / last_n:.2f}")
+        logger.info(f"  最终 5 轮 R(惩罚版): {[f'{r:.1f}' for r in rewards[-5:]]}")
         logger.info(f"  前 20% 平均 placed: {sum(placed_list[:first_n]) / first_n:.1f}")
         logger.info(f"  后 20% 平均 placed: {sum(placed_list[-last_n:]) / last_n:.1f}")
-        logger.info(f"  最佳 R: {best_r:.2f} (ep {best_ep})")
+        logger.info(f"  最佳 R_clean: {best_r:.2f} (ep {best_ep})")
+        if clean_history:
+            logger.info(f"  前 20% 平均 R_clean: {first_avg_clean_r:.2f}")
+            logger.info(f"  后 20% 平均 R_clean: {last_avg_clean_r:.2f}")
 
         self._pcb_history.append({
             "pcb": pcb_name,
@@ -875,17 +1104,35 @@ class Runner:
             "last_avg_r": sum(rewards[-last_n:]) / last_n,
             "first_avg_placed": sum(placed_list[:first_n]) / first_n,
             "last_avg_placed": sum(placed_list[-last_n:]) / last_n,
+            "best_clean_r": best_clean_r,
+            "first_avg_clean_r": first_avg_clean_r,
+            "last_avg_clean_r": last_avg_clean_r,
         })
 
         summary_path = os.path.join(self.save_dir, "training_summary.json")
+        greedy_best = {
+            "score": self.global_best_greedy_score,
+            "full_place_rate": self.global_best_greedy_full_place_rate,
+            "mean_reward": self.global_best_greedy_mean_reward,
+            "episode": self.global_best_greedy_episode,
+            "per_board": self.global_best_greedy_per_board,
+        }
         with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(self._pcb_history, f, indent=2, ensure_ascii=False)
+            json.dump(
+                {
+                    "group": self.group_label,
+                    "boards": self._pcb_history,
+                    "greedy_best": greedy_best,
+                },
+                f, indent=2, ensure_ascii=False,
+            )
         logger.info(f"  汇总已保存: {summary_path}")
 
     def _write_final_summary(self):
         """全部 PCB 训练完成后写最终汇总。"""
         logger.info("=" * 50)
         logger.info("全部训练完成 — 最终汇总")
+        logger.info(f"Training group: {self.group_label} (use_expert={self.use_expert})")
         for h in self._pcb_history:
             improved = h["last_avg_r"] > h["first_avg_r"]
             arrow = "↑" if improved else "↓"
@@ -897,8 +1144,15 @@ class Runner:
                 f"best_R={h['best_reward']:.1f}"
             )
         logger.info(
-            f"\n全局最佳: R={self.global_best_reward:.2f} "
+            f"\n全局最佳(clean 口径,仅参考): R={self.global_best_reward:.2f} "
             f"board={self.global_best_pcb} ep={self.global_best_episode}"
+        )
+        logger.info(
+            f"全局最佳(贪心部署口径,决定 best_model.pt): "
+            f"score={self.global_best_greedy_score:.3f} "
+            f"fpr={self.global_best_greedy_full_place_rate:.2%} "
+            f"reward={self.global_best_greedy_mean_reward:.2f} "
+            f"ep={self.global_best_greedy_episode}"
         )
         logger.info(f"全局最佳权重: {os.path.join(self.save_dir, 'best_model.pt')}")
         logger.info(f"日志文件: {os.path.join(self.save_dir, 'training_log.txt')}")

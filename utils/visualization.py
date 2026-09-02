@@ -1,12 +1,12 @@
 """PCB 布局可视化（matplotlib）。
 
-绘制板框矩形 + 1mm 颗粒度网格 + 各元件矩形 + ID/net 标注。
+绘制板框矩形 + 1mm 主网格（粗）+ 0.2mm(CELL_SIZE) 次网格（细）+ 各元件矩形 + ID/net 标注。
 支持中文标题，元件过小时 ID 自动外移避免遮挡。
 """
 
 import logging
 import os
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.ticker as ticker
 import numpy as np
+
+from env.pcb_layout_env import Config
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ COMP_COLORS = {
 BOARD_COLOR = "#333333"
 BOARD_BG = "#F5F5F0"
 GRID_COLOR = "#E0E0D8"
+GRID_COLOR_MINOR = "#ECECE6"     # 0.2mm 次网格：更淡的细线
 
 COLOR_ID = "#D32F2F"           # 元件 ID：红色
 COLOR_NET = "#333333"          # Net 信息：黑色
@@ -72,16 +75,19 @@ def _is_small_bbox(bbox: Tuple[float, float, float, float]) -> bool:
     return w * h < 6.0 or w < 2.0 or h < 2.0
 
 
-def _auto_tick_step(board_w: float, board_h: float) -> float:
-    """自动计算坐标轴主刻度步长。
+def _auto_tick_step(board_w: float, board_h: float, cell: float = Config.CELL_SIZE) -> float:
+    """自动计算坐标轴主刻度步长（须为 CELL_SIZE 整数倍，保证标注落在网格线上）。
 
-    使得板框范围内有大约 5-10 根刻度线，结果取整到 1/5/10。
+    候选步长采用 1-2-5 进制：50/25/10/5/2.5/1 × cell →
+    10/5/2/1/0.5/0.2mm 等量级（比原 50/20/... 更规整）。
+    选 <= target*1.5 的最大者；兜底返回 cell（最细颗粒度）。
     """
     target = max(board_w, board_h) / 6.0
-    for step in [10.0, 5.0, 2.0, 1.0]:
+    for k in [50, 25, 10, 5, 2.5, 1]:
+        step = k * cell
         if step <= target * 1.5:
             return step
-    return 1.0
+    return cell
 
 
 # ==================== 主绘图函数 ====================
@@ -110,6 +116,8 @@ def draw_layout(
     (min_x, min_y), (max_x, max_y) = board_bounds
     board_w = max_x - min_x
     board_h = max_y - min_y
+    cell = Config.CELL_SIZE  # 0.2mm 布局颗粒度（单一来源）
+    margin = max(board_w, board_h) * 0.10  # 坐标轴外扩，供刻度留白
 
     # 画布尺寸：根据板框比例自适应，最小 4 英寸
     fig_w = max(4.0, board_w / 12)
@@ -117,20 +125,32 @@ def draw_layout(
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.patch.set_facecolor("white")
 
-    # ---- 板框 ----
+    # ---- 板框（背景填充，置于网格之下，保证网格/元件可见） ----
     board_rect = mpatches.Rectangle(
         (min_x, min_y), board_w, board_h,
         linewidth=3, edgecolor=BOARD_COLOR, facecolor=BOARD_BG,
-        zorder=1,
+        zorder=0,
     )
     ax.add_patch(board_rect)
 
-    # ---- 1mm 网格 ----
+    # ---- 主(1mm 粗线) + 次(CELL_SIZE 细线) 双网格 ----
+    # 网格范围同步外扩到 margin 区，使坐标轴次刻度在留白处也有对应网格线，
+    # 消除「有刻度无线」的错位（原网格仅覆盖板框，刻度覆盖 margin）。
     if show_grid:
-        for x in np.arange(min_x, max_x + 1.0, 1.0):
-            ax.axvline(x, color=GRID_COLOR, linewidth=0.2, zorder=0)
-        for y in np.arange(min_y, max_y + 1.0, 1.0):
-            ax.axhline(y, color=GRID_COLOR, linewidth=0.2, zorder=0)
+        gx0, gx1 = min_x - margin, max_x + margin
+        gy0, gy1 = min_y - margin, max_y + margin
+        # 次网格：每 CELL_SIZE(0.2mm) 一道极淡细线，体现布局颗粒度
+        for x in np.arange(gx0, gx1 + cell, cell):
+            ax.axvline(x, color=GRID_COLOR_MINOR, linewidth=0.15, zorder=1)
+        for y in np.arange(gy0, gy1 + cell, cell):
+            ax.axhline(y, color=GRID_COLOR_MINOR, linewidth=0.15, zorder=1)
+        # 主网格：每 1mm 一道粗线（覆盖在次网格之上，作为视觉基准）。
+        # 端点用 gx1+1e-9（而非 +1.0），确保主网格不超出次网格范围，
+        # 因 1mm = 5×CELL_SIZE，主网格线天然落在次网格线上（主 ⊂ 次）。
+        for x in np.arange(gx0, gx1 + 1e-9, 1.0):
+            ax.axvline(x, color=GRID_COLOR, linewidth=0.4, zorder=2)
+        for y in np.arange(gy0, gy1 + 1e-9, 1.0):
+            ax.axhline(y, color=GRID_COLOR, linewidth=0.4, zorder=2)
 
     # ---- 各元件 ----
     for comp in components:
@@ -197,8 +217,7 @@ def draw_layout(
               framealpha=0.9, edgecolor="#CCCCCC")
 
     # ---- 坐标轴 ----
-    tick_step = _auto_tick_step(board_w, board_h)
-    margin = max(board_w, board_h) * 0.10
+    tick_step = _auto_tick_step(board_w, board_h, cell)
     ax.set_xlim(min_x - margin, max_x + margin)
     ax.set_ylim(min_y - margin, max_y + margin)
     # KiCad 视图 Y 轴向下（top 在上方），invert 使 y 小值显示在上方，
@@ -208,8 +227,9 @@ def draw_layout(
 
     ax.xaxis.set_major_locator(ticker.MultipleLocator(tick_step))
     ax.yaxis.set_major_locator(ticker.MultipleLocator(tick_step))
-    ax.xaxis.set_minor_locator(ticker.MultipleLocator(1.0))
-    ax.yaxis.set_minor_locator(ticker.MultipleLocator(1.0))
+    # 次刻度 = CELL_SIZE(0.2mm)，与次网格一致，体现 0.2mm 颗粒度
+    ax.xaxis.set_minor_locator(ticker.MultipleLocator(cell))
+    ax.yaxis.set_minor_locator(ticker.MultipleLocator(cell))
 
     ax.set_xlabel("X (mm)", fontsize=9)
     ax.set_ylabel("Y (mm)", fontsize=9)
@@ -574,3 +594,77 @@ def plot_reward_compare(
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     logger.info(f"Reward compare curve saved to: {output_path}")
+
+
+# ==================== 100 次推理评测三合一对比直方图 ====================
+
+
+def plot_inference_eval(
+    records_a: Dict,
+    records_b: Dict,
+    pcb_name: str,
+    out_path: str,
+    dpi: int = 150,
+):
+    """绘制 100 次推理评测的 A/B 三合一对比直方图（完成度 / 尝试次数 / reward）。
+
+    一张图含 3 个子图，每个子图把 A(with_expert)、B(baseline) 两组分布叠化
+    （alpha=0.5 直方图）+ 各自均值竖线，用于直观对比两组推理质量分布。
+
+    Args:
+        records_a: run_inference_eval 返回的 A 组结果 dict（含 completions_ratio/attempts/rewards/stats）
+        records_b: 同上，B 组结果
+        pcb_name: PCB 名称（用于标题）
+        out_path: 输出 PNG 路径
+        dpi: 分辨率
+    """
+    _setup_chinese_font()
+
+    def _vals(rec, key):
+        return list(rec.get(key, []))
+
+    color_a, color_b = _COMPARE_COLORS[0], _COMPARE_COLORS[1]
+    label_a, label_b = "A(with_expert)", "B(baseline)"
+
+    panels = [
+        ("完成度 (placed / N)", "completions_ratio", color_a, color_b, label_a, label_b, False),
+        ("尝试次数 (steps)", "attempts", color_a, color_b, label_a, label_b, False),
+        ("Reward (终局质量分)", "rewards", color_a, color_b, label_a, label_b, False),
+    ]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    for ax, (title, key, ca, cb, la, lb, _log) in zip(axes, panels):
+        va = _vals(records_a, key)
+        vb = _vals(records_b, key)
+        # 直方图（叠化）
+        if va:
+            ax.hist(va, bins=20, alpha=0.5, color=ca, label=f"{la} (n={len(va)})", density=False)
+        if vb:
+            ax.hist(vb, bins=20, alpha=0.5, color=cb, label=f"{lb} (n={len(vb)})", density=False)
+
+        # 均值竖线
+        if va:
+            ma = float(np.mean(va))
+            ax.axvline(ma, color=ca, linestyle="--", linewidth=2,
+                       label=f"{la} 均值={ma:.2f}")
+        if vb:
+            mb = float(np.mean(vb))
+            ax.axvline(mb, color=cb, linestyle="--", linewidth=2,
+                       label=f"{lb} 均值={mb:.2f}")
+
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_xlabel(title.split(" ")[0], fontsize=9)
+        ax.set_ylabel("次数", fontsize=9)
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle(
+        f"100 次推理评测分布对比 — {pcb_name}",
+        fontsize=13, fontweight="bold", y=0.99,
+    )
+    plt.tight_layout(rect=(0, 0, 1, 0.95))
+    os.makedirs(os.path.dirname(out_path) if os.path.dirname(out_path) else ".", exist_ok=True)
+    fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    logger.info(f"Inference eval compare plot saved to: {out_path}")

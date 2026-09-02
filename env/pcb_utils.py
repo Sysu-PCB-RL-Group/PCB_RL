@@ -61,6 +61,28 @@ class PCBUtils:
         # 软间距连续惩罚：(threshold - gap)² × edge
         return (0.0, (spacing_threshold - gap) ** 2 * edge)
 
+    # ========== 层冲突语义（双面贴装） ==========
+
+    @staticmethod
+    def layers_conflict(layer_a: int, layer_b: int, dual_sided: bool = True) -> bool:
+        """判定两元件是否可能因 XY 重叠而冲突（即是否需继续做 AABB 碰撞检测）。
+
+        仅同层元件之间才判定碰撞；异层（TOP/BOTTOM）物理上被板材隔开，
+        即使 XY 完全重叠也不冲突。layer==2 为内层/埋入元件，不移动、不导出，
+        与表层元件隔离；两个 layer==2 之间按同层保守处理。
+
+        Args:
+            layer_a: 元件 A 的层编码 (0=TOP, 1=BOTTOM, 2=内层/未知)
+            layer_b: 元件 B 的层编码
+            dual_sided: 是否启用双面隔离；False 时回退旧行为（忽略层，全部按同层）
+
+        Returns:
+            True 表示需要继续做 bbox 碰撞检测；False 表示物理隔绝，可直接跳过。
+        """
+        if not dual_sided:
+            return True  # 旧行为：忽略层
+        return layer_a == layer_b
+
     # ========== C3：板框约束 ==========
 
     @staticmethod

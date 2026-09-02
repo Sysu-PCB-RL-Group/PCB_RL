@@ -218,14 +218,14 @@ class DQNAgent:
                     # x1 坐标掩码：屏蔽超出真实网格宽度的坐标
                     # global_features[0] = grid_width / GRID_W
                     grid_w = (sub_next["global_features"][:, 0] * Config.GRID_W).round().long()
-                    x_mask = torch.arange(Config.GRID_W, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
+                    x_mask = torch.arange(self.grid_w, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
                     next_q_all[~x_mask] = -float('inf')
 
                 elif nsid == 2:
                     # y1 坐标掩码：屏蔽超出真实网格高度的坐标
                     # global_features[1] = grid_height / GRID_H
                     grid_h = (sub_next["global_features"][:, 1] * Config.GRID_H).round().long()
-                    y_mask = torch.arange(Config.GRID_H, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
+                    y_mask = torch.arange(self.grid_h, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
                     next_q_all[~y_mask] = -float('inf')
 
                 target_q[ns_idx] = next_q_all.max(1)[0].unsqueeze(1)
@@ -309,10 +309,10 @@ class DQNAgent:
                 legal = (placed_flags < 0.5).to(self.device)
             elif sid == 1:
                 grid_w = (sub_obs["global_features"][:, 0] * Config.GRID_W).round().long()
-                legal = torch.arange(Config.GRID_W, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
+                legal = torch.arange(self.grid_w, device=self.device).unsqueeze(0) < grid_w.unsqueeze(1)
             elif sid == 2:
                 grid_h = (sub_obs["global_features"][:, 1] * Config.GRID_H).round().long()
-                legal = torch.arange(Config.GRID_H, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
+                legal = torch.arange(self.grid_h, device=self.device).unsqueeze(0) < grid_h.unsqueeze(1)
             else:
                 legal = torch.ones_like(cur_q, dtype=torch.bool)
 

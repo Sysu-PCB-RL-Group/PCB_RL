@@ -1,6 +1,6 @@
 """PCB_RL CLI 入口。
 
-使用真实 KiCad PCB 数据训练：python main.py（默认跨 5 个板子随机训练）
+使用真实 KiCad PCB 数据训练：python main.py（默认训练开关小板，可用 --board 指定其它板）
 
 基于 SPEC v2.1。
 """
@@ -43,6 +43,10 @@ def get_config():
         "--board", type=str, default=None,
         help="指定训练的板子名（如 '开关小板'），不指定则训练所有板子",
     )
+    parser.add_argument(
+        "--with_expert", action="store_true",
+        help="启用专家轨迹注入（BC 预训练 + ExpertReplayBuffer）；不指定则为纯 RL baseline",
+    )
 
     # === 环境 & 设备 ===
     parser.add_argument(
@@ -60,6 +64,9 @@ def get_config():
 
     # 标记 --total_episodes 是否为用户显式指定
     args.explicit_total_episodes = "--total_episodes" in sys.argv
+
+    # --with_expert 映射为 use_expert，供 Runner 选择 baseline / 专家组
+    args.use_expert = args.with_expert
 
     return args
 

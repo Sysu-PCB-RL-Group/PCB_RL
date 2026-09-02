@@ -137,15 +137,14 @@ def test_patched_env_reset():
     import torch
 
     env = create_patched_env()
-    obs_dim = env.N_movable * 8 + env.N_movable + 4
     agent = DQNAgent(
-        obs_dim=obs_dim, n_movable=env.N_movable,
-        grid_w=env.grid_width, grid_h=env.grid_height,
+        n_movable=env.N_movable,
+        grid_w=Config.GRID_W, grid_h=Config.GRID_H,
         device=torch.device("cpu"),
     )
 
     # 运行一个 episode（修改 env 状态）
-    from scripts.run_inference import run_inference_episode
+    from run_inference import run_inference_episode
     run_inference_episode(env, agent)
 
     # reset 后应清除 placed_list

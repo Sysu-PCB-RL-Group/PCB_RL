@@ -7,13 +7,13 @@
 ```
 PCB_RL/
 ├── main.py                       # CLI 入口（训练入口）
-├── run.py                        # 两阶段训练循环（BC 预训练 + RL + 专家注入）
+├── run.py                        # 训练循环（--with_expert 走 BC 预训练+专家注入，否则纯 RL baseline）
 ├── run_inference.py              # 推理脚本（支持单板 / 批量）
 ├── requirements.txt
 ├── config/
 │   └── argument.txt              # 超参数配置（含专家注入参数）
 ├── data/
-│   ├── kicad-native-batch/       # 立创 EDA KiCad 项目（5个极简训练板）
+│   ├── kicad-native-batch/       # 立创 EDA KiCad 项目（递归扫描 .kicad_pcb）
 │   │   ├── *.kicad_pcb           # PCB 布局文件（RL 读取的数据源）
 │   │   ├── *.kicad_sch           # 原理图
 │   │   └── *.kicad_pro           # KiCad 项目文件
@@ -64,63 +64,57 @@ PCB_RL/
 
 ## 数据
 
-当前训练数据集：`data/kicad-native-batch/` 下 **5 个极简板子**，全部适配 21×21 网格：
+数据源：`data/kicad-native-batch/`（立创 EDA 导出的真实 KiCad 项目，递归扫描 `.kicad_pcb`）。
 
-| 板子 | 元件数 | 网络数 | 网格尺寸 |
-|:---|:---|:---|:---|
-| 开关小板 | 6 | 3 | 6×3 |
-| Connector | 8 | 3 | 13×13 |
-| 灯板2 | 6 | 3 | 12×10 |
-| Button | 4 | 3 | 16×10 |
-| 按键侧板V0.1 | 2 | 3 | 2×16 |
+> 自 2026-08-01 起，**统一只使用「开关小板」**（`ran-pang-airlink-86231b34--开关小板-883285b3`，FP=6 / Net=3 / grid 36×36，CELL_SIZE=0.2mm）作为唯一训练与推理板，简单可控、便于快速迭代；其余板暂未纳入训练。
 
 每个 PCB 包含：元件列表、网络连接、板框（Edge.Cuts 层）、走线 + 敷铜（导出时全部保留）。
 
-训练采用跨板随机选板机制：每 episode 从 5 个板子中随机选一个，Agent 和 Buffer 全局共享。
-
 ## 训练
 
-训练分为两个阶段：
+训练有两种可选模式（由 `main.py --with_expert` 切换；**默认 = baseline 纯 RL**）：
 
-### Phase 1：BC 预训练（Behavior Cloning）
+- **baseline（纯 RL，默认）**：不加 `--with_expert`，标准 DQN 训练，无 BC 预训练、无专家注入，使用普通 `ReplayBuffer`（容量 REPLAY_BUFFER_SIZE=100000，纯探索环形）。
+- **with_expert（专家组）**：加 `--with_expert`，先 BC 预训练再用 `ExpertReplayBuffer` 注入专家经验（见下两阶段）。
+
+### Phase 1：BC 预训练（仅 with_expert 模式）
 
 利用 KiCad 源数据自带的「完美布局」生成专家轨迹：
 1. **反向拆解**：从完整布局逐件拆除（先拆小、后拆大），反转得到正向完美轨迹
-2. **微量变异**：20% 概率位置 ±1 格 / 10% 概率旋转 ±90°，增加轨迹多样性
+2. **微量变异**：20% 概率位置 ±2 格 / 10% 概率旋转（全 4 种旋转），增加轨迹多样性
 3. **纯监督学习**：用专家 transition 训练网络 50 epoch（交叉熵损失）
 
-### Phase 2：RL 训练 + 专家注入
+### Phase 2：RL 训练 + 专家注入（仅 with_expert 模式）
 
 1. 加载 BC 预训练权重作为初始化
 2. 正常 DQN 训练，ε=0.6→0.1 指数衰减（10000 ep）
-3. Buffer 中 20% 专家 transition 常驻 + 80% 探索经验
-4. 优先经验回放（PER），按 TD-error 优先级采样
+3. 专家组 buffer 总容量 = EXPERT_TOTAL_BUFFER（100000）：专家常驻区 = EXPERT_TOTAL_TRANSITIONS（= 总buffer × EXPERT_BUFFER_RATIO = 70000）、探索区 = 30000；采样对整池均匀随机，专家占比≈70%（非每 batch 硬拆分）
+4. 优先级经验回放（PER）参数保留（α=0.6），但当前 sample 为整池均匀随机（is_weights=1.0，PER 暂未实际启用）
 
 ```powershell
 # Windows（PowerShell）
 $env:KICAD_PATH = "E:\Kicad"
 
-# 默认训练（两阶段自动执行）
+# 默认 = baseline（纯 RL，无 BC / 无专家注入）
 python main.py
-
-# 指定训练轮数
 python main.py --total_episodes 10000
 
-# 禁用专家注入（纯 DQN 训练）
-python main.py --use_expert False
+# 专家组 = BC 预训练 + 专家注入（加 --with_expert）
+python main.py --with_expert
+python main.py --with_expert --total_episodes 10000
 ```
 
 ```bash
 # macOS / Linux
 export KICAD_PATH="/path/to/kicad"
 
-python main.py
-python main.py --total_episodes 10000
+python main.py                  # baseline（默认）
+python main.py --with_expert   # 专家组
 ```
 
-**专家 transition 生成**：首次训练自动从 KiCad 源数据生成专家轨迹，缓存到 `data/expert_transitions/`。后续训练自动从缓存加载，无需重新生成。
+**专家 transition 生成（仅 with_expert 模式）**：若 `data/expert_transitions/` 缓存缺失或不足，则首次训练从 KiCad 源数据生成专家轨迹并缓存；已存在时直接加载，无需重新生成。
 
-**输出**：`result/best_model.pt`（全局最佳权重）、`result/bc_pretrained.pt`（BC 预训练权重）、每板 loss 曲线和布局导出。
+**输出**：`result/best_model.pt`（全局最佳权重，两模式均有）、`result/bc_pretrained.pt`（BC 预训练权重，仅 with_expert）、每板 loss 曲线和布局导出。
 
 ## 推理
 
@@ -167,8 +161,8 @@ python run_inference.py --model result/best_model.pt --debug
 - **Phase 1**（BC 预训练）：仅用专家 transition，50 epoch 纯监督学习
 - **Phase 2**（RL）：ε 从 0.6 指数衰减到 0.1（10000 ep，BC 预训练后无需从 1.0 起步）
 - Episode 0~2999 仅精简版 reward（惩罚+完成奖励），3000+ 品质项线性升温，10000+ 完整版 reward
-- Replay buffer：ExpertReplayBuffer（专家容量 = 专家 transition 总数，普通容量 = 4× 专家数）
-- PER α=0.6, β=0.4→1.0，每条普通经验写入时初始优先级设为当前最大
+- Replay buffer：ExpertReplayBuffer（专家常驻区容量 = EXPERT_TOTAL_TRANSITIONS = 70000，探索区容量 = EXPERT_TOTAL_BUFFER − EXPERT_TOTAL_TRANSITIONS = 30000，总 100000；采样整池均匀随机）
+- PER α=0.6, β=0.4→1.0（参数保留，但 sample 当前为整池均匀随机，PER 暂未实际启用）
 
 ## 导出机制
 
@@ -201,5 +195,7 @@ pytest tests/
 | EXPERT_TRAJECTORIES_PER_BOARD | 20 | 每板生成专家轨迹数 |
 | EXPERT_EPSILON_DECOMPOSE | 0.5 | 拆解随机化概率 |
 | EXPERT_BC_EPOCHS | 50 | BC 预训练 epoch 数 |
-| EXPERT_BUFFER_RATIO | 0.7 | Phase 2 buffer 专家占比（每 batch 采样占比） |
+| EXPERT_TOTAL_BUFFER | 100000 | 专家组 buffer 总容量（专家区+探索区）；唯一可调旋钮之一 |
+| EXPERT_BUFFER_RATIO | 0.7 | 专家占总体比例（唯一可调旋钮之二）；驱动 buffer 构成与生成目标；采样仍为整池均匀随机 |
+| EXPERT_TOTAL_TRANSITIONS | 70000 | 派生（=EXPERT_TOTAL_BUFFER×EXPERT_BUFFER_RATIO）：生成目标=专家常驻区容量，勿在 argument.txt 直接设 |
 | PER_ALPHA | 0.6 | 优先级指数 |

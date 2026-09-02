@@ -23,7 +23,9 @@ def _make_dict_obs(n_slots=5, global_dim=8):
     """构建符合 Dict 格式的假观测。"""
     return {
         "component_slots": np.random.randn(n_slots, 8).astype(np.float32),
-        "global_features": np.random.randn(global_dim).astype(np.float32),
+        # 必须非负：learn() 中 grid_w=(global_features[:,0]*GRID_W) 一旦为负，
+        # 会导致 next_q 掩码全 False -> -inf 目标 -> NaN loss。
+        "global_features": (np.random.rand(global_dim) + 0.1).astype(np.float32),
     }
 
 
@@ -46,7 +48,7 @@ def test_select_action_respects_mask():
 def test_select_action_different_steps():
     """不同 step_id 产生不同维度输出。"""
     agent = _make_agent(n_movable=5, grid_w=10, grid_h=8)
-    obs = _make_dict_obs(n_slots=10)
+    obs = _make_dict_obs(n_slots=5)
 
     mask0 = np.ones(5, dtype=bool)
     a0 = agent.select_action(obs, mask0, step_id=0, epsilon=0.0)
@@ -125,7 +127,7 @@ def test_learn_does_not_crash():
         buffer.add(obs, 0, 0.0, obs, np.ones(5, dtype=bool), False, sid, next_sid)
 
     batch = buffer.sample(5)
-    loss = agent.learn(batch)
+    loss, _ = agent.learn(batch)
     assert not np.isnan(loss), f"Loss is NaN"
     assert loss >= 0.0, f"Loss should be non-negative, got {loss}"
 
@@ -141,7 +143,7 @@ def test_learn_with_terminal_transition():
         buffer.add(obs, 0, 1.0, obs, np.ones(5, dtype=bool), sid == 4, sid, next_sid)
 
     batch = buffer.sample(5)
-    loss = agent.learn(batch)
+    loss, _ = agent.learn(batch)
     assert not np.isnan(loss)
 
 
@@ -160,7 +162,7 @@ def test_learn_next_step_id_routing():
     buffer.add(obs, 0, -5.0, obs, np.ones(2, dtype=bool), True, 4, -1)
 
     batch = buffer.sample(6)
-    loss = agent.learn(batch)
+    loss, _ = agent.learn(batch)
     assert not np.isnan(loss)
 
 
@@ -185,7 +187,7 @@ def test_learn_target_mask_placed_component():
         buffer.add(obs, 0, 0.0, obs, np.ones(5, dtype=bool), False, 0, 1)
 
     batch = buffer.sample(5)
-    loss = agent.learn(batch)
+    loss, _ = agent.learn(batch)
     assert not np.isnan(loss), "Target mask should not cause NaN loss"
 
 

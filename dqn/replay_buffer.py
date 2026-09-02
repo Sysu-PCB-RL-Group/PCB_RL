@@ -268,11 +268,15 @@ class ExpertReplayBuffer(ReplayBuffer):
     # ==================== PER 采样 ====================
 
     def sample(self, batch_size: int):
-        """优先经验回放采样。
+        """整池均匀随机采样（专家常驻区全量 + 探索区有效槽）。
 
-        按比例（expert_ratio）从专家区和普通区采样，使用 PER 优先级。
+        设计：专家常驻区容量 = n_expert（目标 70000，永远全量有效），探索区容量 =
+        EXPERT_EXPLORE_CAPACITY（30000，环形覆盖、只挤掉本区旧值）。对整池做均匀
+        随机采样后，因专家区占 7/10，自然得到约 7:3 组成——无需在采样时强制比例
+        （与「抽的时候不严格按比例」一致）。IS 权重统一 = 1.0（无 PER 修正）。
+
         采样后可通过 get_last_sampled_indices() / get_last_is_weights()
-        获取本次采样的索引和 IS 权重，用于 TD-error 回写。
+        获取本次采样的索引和 IS 权重，用于 TD-error 回写（此处 IS 恒为 1.0）。
 
         Args:
             batch_size: 采样数量
@@ -280,74 +284,33 @@ class ExpertReplayBuffer(ReplayBuffer):
         Returns:
             8 元组 (obs_dict, actions, rewards, next_obs_dict, masks, dones, step_ids, next_step_ids)
         """
-        n_expert = int(batch_size * self.expert_ratio)
-        n_normal = batch_size - n_expert
+        # 候选全局索引池：专家区全量（常驻）+ 探索区已填充的有效槽
+        expert_idx = list(range(len(self.expert_buffer)))
+        explore_local = [i for i, x in enumerate(self.normal_buffer) if x is not None]
+        explore_idx = [self.expert_capacity + i for i in explore_local]
 
-        # 确保不超出实际可用数量
-        n_expert_available = len(self.expert_buffer)
-        n_normal_available = self._normal_count
-        n_normal = min(n_normal, n_normal_available)
-        n_expert = min(n_expert, n_expert_available)
-
-        if n_expert == 0 and n_normal == 0:
+        pool = expert_idx + explore_idx
+        if len(pool) == 0:
             raise RuntimeError(
-                f"ExpertReplayBuffer.sample({batch_size}): no experiences available "
-                f"(expert={n_expert_available}, normal={n_normal_available})"
+                f"ExpertReplayBuffer.sample({batch_size}): 缓冲区为空，无法采样 "
+                f"(expert={len(self.expert_buffer)}, normal={self._normal_count})"
             )
 
-        # 采样专家经验（均匀采样——专家质量均匀，无需 PER 区分优先级）
-        expert_indices = []
-        expert_is_weights = []
-        if n_expert > 0 and n_expert_available > 0:
-            expert_indices = np.random.choice(
-                len(self.expert_buffer), size=n_expert, replace=False
-            ).tolist()
-            # 均匀采样无分布偏差，IS 权重 = 1.0
-            expert_is_weights = [1.0] * n_expert
+        # 池小于批次时允许放回采样，避免取空报错（小批次对 DQN 训练无害）
+        replace = len(pool) < batch_size
+        chosen = np.random.choice(pool, size=batch_size, replace=replace).tolist()
 
-        # 采样普通经验（只从已填充的有效槽位中采样，避免命中 None）
-        normal_indices = []
-        normal_is_weights = []
-        if n_normal > 0 and n_normal_available > 0:
-            normal_start = self.expert_capacity
-            # 只对已填充的槽位构建优先级分布
-            valid_mask = np.array([x is not None for x in self.normal_buffer], dtype=bool)
-            if not valid_mask.any():
-                normal_indices = []
-            else:
-                valid_local_indices = np.where(valid_mask)[0]  # 已填充槽位的局部索引
-                valid_prio = self.priorities[normal_start:][valid_mask]
-                valid_prio = valid_prio + self._epsilon
-                valid_probs = valid_prio ** self.per_alpha
-                valid_probs /= valid_probs.sum()
-
-                chosen_positions = np.random.choice(
-                    len(valid_local_indices), size=n_normal, replace=False, p=valid_probs
-                )
-                normal_local_indices = valid_local_indices[chosen_positions]
-                normal_indices = (normal_start + normal_local_indices).tolist()
-
-                total_n = n_expert_available + n_normal_available
-                normal_is_weights = self._compute_is_weights(
-                    valid_probs[chosen_positions], total_n
-                )
-
-        # 合并（numpy array 用 list() 拼接，避免不同长度时 + 逐元素运算报错）
-        all_indices = expert_indices + normal_indices
-        all_is_weights = list(expert_is_weights) + list(normal_is_weights)
-
-        # 保存本次采样索引，供调用方回写 TD-error
-        self._last_sampled_indices = all_indices
-        self._last_is_weights = np.array(all_is_weights, dtype=np.float32)
+        # 记录本次采样索引（供 update_priorities 回写 TD-error，本采样未用 PER 权重）
+        self._last_sampled_indices = chosen
+        self._last_is_weights = np.ones(batch_size, dtype=np.float32)  # 均匀采样无 IS 修正
 
         # 从 buffer 取数据
         batch = []
-        for idx in all_indices:
+        for idx in chosen:
             if idx < len(self.expert_buffer):
                 batch.append(self.expert_buffer[idx])
             else:
-                normal_idx = idx - self.expert_capacity
-                batch.append(self.normal_buffer[normal_idx])
+                batch.append(self.normal_buffer[idx - self.expert_capacity])
 
         obs_list, actions, rewards, next_obs_list, masks, dones, step_ids, next_step_ids = zip(*batch)
 
@@ -361,9 +324,6 @@ class ExpertReplayBuffer(ReplayBuffer):
             np.array(step_ids, dtype=np.int64),
             np.array(next_step_ids, dtype=np.int64),
         )
-
-        # 递增 β（向 1.0 收敛）
-        self.per_beta = min(1.0, self.per_beta + self.per_beta_increment)
 
         return result
 

@@ -50,7 +50,7 @@ class Config:
 
     # DQN 训练参数
     BATCH_SIZE: int = 64
-    REPLAY_BUFFER_SIZE: int = 10000
+    REPLAY_BUFFER_SIZE: int = 100000   # baseline 组 replay buffer 总容量(对齐专家组 100000)
     LEARNING_RATE: float = 0.0001
     TARGET_UPDATE_FREQ: int = 20   # 每 N 个 episode 同步一次 target 网络
     WARMUP_EPISODES: int = 500
@@ -74,20 +74,33 @@ class Config:
     NORMALIZE_OBS: bool = False
 
     # ---- 专家轨迹注入 ----
-    EXPERT_TOTAL_TRANSITIONS: int = 20000   # 目标专家 transition 总数（达到即停）
-    EXPERT_MAX_TRAJECTORIES: int = 5000     # 最大轨迹数安全上限（防死循环）
+    # 专家组 buffer 构成（派生口径）：总 buffer = EXPERT_TOTAL_BUFFER，
+    #   专家常驻区容量 = EXPERT_TOTAL_TRANSITIONS = int(EXPERT_TOTAL_BUFFER × EXPERT_BUFFER_RATIO)
+    #   探索区容量 = EXPERT_TOTAL_BUFFER − EXPERT_TOTAL_TRANSITIONS
+    # 采样时对整池均匀随机（专家区占 0.7，自然≈7:3），不强制比例拆分。
+    EXPERT_TOTAL_BUFFER: int = 100000       # 专家组 buffer 总容量（专家区+探索区）；唯一可调旋钮之一
+    EXPERT_TOTAL_TRANSITIONS: int = 70000   # 生成目标总数=专家常驻区容量；由 load_from_file 派生（=总buffer×占比），勿在 argument.txt 直接设
+    EXPERT_MAX_TRAJECTORIES: int = 8000     # 最大轨迹数安全上限（防死循环）
+    EXPERT_EXPLORE_CAPACITY: int = 30000    # 遗留：现由 EXPERT_TOTAL_BUFFER−EXPERT_TOTAL_TRANSITIONS 派生，不再直接控制
     EXPERT_EPSILON_DECOMPOSE: float = 0.5
     EXPERT_POS_NOISE_PROB: float = 0.2
     EXPERT_ROT_NOISE_PROB: float = 0.1
     EXPERT_BC_EPOCHS: int = 50
-    EXPERT_BUFFER_RATIO: float = 0.7
-    EXPERT_BUFFER_MULTIPLIER: int = 5
+    EXPERT_BUFFER_RATIO: float = 0.7        # 专家占总体比例（唯一可调旋钮之二），驱动 buffer 构成与生成目标
+    EXPERT_BUFFER_MULTIPLIER: int = 5       # 仅用于 generate 阶段内部 replay buffer 容量（×专家数），与训练 buffer 无关
     PER_ALPHA: float = 0.6
     PER_BETA_START: float = 0.4
     BC_REG_LAMBDA: float = 10.0   # BC 正则化强度：RL loss += λ·KL(当前策略‖冻结BC策略)，锚定好策略防学坏
     BC_REG_TEMP: float = 1.0      # BC 正则化 softmax 温度（策略蒸馏温度）
     BC_REG_VALUE_LAMBDA: float = 0.5  # BC 值正则化强度：RL loss += λv·MSE(Q当前, Q_BC)，锚定 Q 值幅度防发散
+    # ---- 双面贴装（层感知碰撞）开关 ----
+    ENABLE_DUAL_SIDED: bool = True  # True=碰撞仅在同层判定(修复后行为)；False=回退旧行为(忽略层，便于 A/B 对比)
+
     EXPERT_TRANSITIONS_DIR: str = "data/expert_transitions"
+
+    # ---- 贪心能力评估（best_model 选择口径）----
+    GREEDY_EVAL_INTERVAL: int = 500   # 每隔多少 episode 跑一次贪心推理评估
+    GREEDY_EVAL_K: int = 10           # 每次评估的贪心 episode 数（eps=0.01）
 
     @classmethod
     def load_from_file(cls, path: str):
@@ -108,49 +121,27 @@ class Config:
                     val_str = val.split("#")[0].strip()
                     if not val_str:
                         continue
-                    try:
-                        # 先尝试整数解析（避免浮点精度问题），失败则 float
-                        val = int(val_str)
-                    except ValueError:
+                    vlow = val_str.lower()
+                    cur = getattr(cls, key, None)
+                    if vlow in ("true", "false") and isinstance(cur, bool):
+                        val = (vlow == "true")
+                    else:
                         try:
-                            val = float(val_str)
+                            # 先尝试整数解析（避免浮点精度问题），失败则 float
+                            val = int(val_str)
                         except ValueError:
-                            continue
+                            try:
+                                val = float(val_str)
+                            except ValueError:
+                                continue
                     if hasattr(cls, key):
                         setattr(cls, key, val)
         except FileNotFoundError:
             logger.warning(f"Config file not found: {path}, using defaults")
 
-    @classmethod
-    def load_dims_from_file(cls, path: str):
-        """从 admin.txt 加载固定维度参数。
-
-        Args:
-            path: admin.txt 文件路径，key=value 格式
-        """
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, val = line.partition("=")
-                    key = key.strip()
-                    val_str = val.split("#")[0].strip()
-                    if not val_str:
-                        continue
-                    try:
-                        dim_val = int(val_str)
-                    except ValueError:
-                        continue
-                    if hasattr(cls, key) and key in ("MAX_MOVABLE", "GRID_W", "GRID_H"):
-                        setattr(cls, key, dim_val)
-            logger.info(
-                f"Dim params loaded from {path}: "
-                f"MAX_MOVABLE={cls.MAX_MOVABLE}, GRID_W={cls.GRID_W}, GRID_H={cls.GRID_H}"
-            )
-        except FileNotFoundError:
-            logger.warning(f"Dim config not found: {path}, using code defaults")
+        # 派生：生成目标 = 专家常驻区容量 = 总 buffer × 专家占比
+        # （argument.txt 中不要写 EXPERT_TOTAL_TRANSITIONS，否则会被文件值覆盖派生结果）
+        cls.EXPERT_TOTAL_TRANSITIONS = int(cls.EXPERT_TOTAL_BUFFER * cls.EXPERT_BUFFER_RATIO)
 
     @classmethod
     def spacing_threshold_for(cls, type_a: int, type_b: int) -> float:
@@ -188,9 +179,9 @@ class PCBLayoutEnv(gym.Env):
 
         import os as _os
 
-        # 加载训练超参（argument.txt），保证 reward 口径与训练一致。
-        # config_path 未指定时默认加载项目 config/argument.txt，与 admin.txt
-        # 对称，避免直接实例化 env（如命令行生成专家轨迹）时漏加载超参，
+        # 加载训练超参与固定维度参数（argument.txt，含 MAX_MOVABLE/GRID_W/GRID_H），
+        # 保证 reward 口径与训练一致。config_path 未指定时默认加载项目 config/argument.txt，
+        # 避免直接实例化 env（如命令行生成专家轨迹）时漏加载超参，
         # 导致 W_COMPLETION 等用类默认值（如 200）而非 argument.txt 的 100。
         if config_path is None:
             config_path = _os.path.join(
@@ -198,10 +189,6 @@ class PCBLayoutEnv(gym.Env):
                 "..", "config", "argument.txt",
             )
         Config.load_from_file(config_path)
-
-        # 加载固定维度参数（admin.txt）
-        _dim_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "config", "admin.txt")
-        Config.load_dims_from_file(_dim_path)
 
         self._pcb_path = pcb_path  # 保存路径，供 reset() 重新加载
 
@@ -645,6 +632,9 @@ class PCBLayoutEnv(gym.Env):
 
         for other in all_fixed_comps:
             if other.id == component.id:
+                continue
+            # 异层元件物理被板材隔开，不计碰撞（修复：碰撞前提为同层）
+            if not PCBUtils.layers_conflict(component.layer, other.layer, Config.ENABLE_DUAL_SIDED):
                 continue
             threshold = Config.spacing_threshold_for(
                 component.package_type, other.package_type

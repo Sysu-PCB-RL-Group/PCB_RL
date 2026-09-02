@@ -195,8 +195,12 @@ def run_inference_episode(
         step_img_dir: 若不为 None，每步后保存中间布局图到此目录
 
     Returns:
-        (episode_reward, step_count, placed_count, action_history)
+        (episode_reward, step_count, placed_count, action_history, final_layout_reward)
+        episode_reward: 仅成功放置步累加的 reward(干净质量分)
+        step_count: 本 episode 总步数(含失败重试，作诊断)
+        placed_count: 成功放置的元件数
         action_history: [(comp_id, gx1, gy1, rot, lay), ...]
+        final_layout_reward: evaluate_final_layout 终局独立质量评估(quality_scale=1.0)
     """
     from env.pcb_layout_env import Config
 
@@ -227,10 +231,16 @@ def run_inference_episode(
         prev_placed = placed_count
         obs_next, reward, terminated, truncated, info = env.step(full_action)
         done = terminated or truncated
-        episode_reward += reward
-        step_count += 1
         placed_count = info.get("placed_count", 0)
         is_placed = placed_count > prev_placed  # 准确：placed_list 增加了才算成功
+        # 仅累加成功放置步的 reward：失败重试步(死亡循环)只扣惩罚、不给品质项，
+        # 若全步累加会被大量负惩罚主导，导致 episode_reward 失真(≈ -7755 而非真实质量分)。
+        if is_placed:
+            episode_reward += reward
+        step_count += 1
+        # 全部可移动元件放置完成即提前终止，省去后续无意义(或触发截断的)无效步
+        if placed_count >= env.N_movable:
+            break
 
         # 记录行动历史
         comp = env.movable_list[full_action[0]]
@@ -261,7 +271,105 @@ def run_inference_episode(
             from utils.visualization import draw_layout
             draw_layout(viz_comps, board_bounds, step_path, title=title)
 
-    return episode_reward, step_count, placed_count, action_history
+    # 终局独立质量评估(quality_scale=1.0，与重试/失败步彻底解耦)，作为主报告值
+    final_layout_reward = evaluate_final_layout(env)
+    return episode_reward, step_count, placed_count, action_history, final_layout_reward
+
+
+def evaluate_final_layout(env) -> float:
+    """终局独立质量评估：在全部元件放置完成后的终态，以 quality_scale=1.0 一次性汇总
+    布局质量分，与重试/失败步彻底解耦。不修改 env 状态（不影响后续 .kicad_pcb 导出）。
+
+    计算口径与 env._calculate_reward 一致，但为「终局单次」语义：
+      - 全局项（net_aggregation / congestion）在终态全集合上只算一次；
+      - 顺序项（decoupling 按元件、large_comp 按 placed_list 顺序）逐元件累加；
+      - 完成奖励 W_COMPLETION 全放完一次性发放；
+      - 惩罚项（硬重叠 / 软间距 / 出界）按终态各已放置元件碰撞量求和（合法布局应≈0）。
+    """
+    from env.pcb_layout_env import Config
+    from env.pcb_utils import PCBUtils
+
+    quality_scale = 1.0
+    placed_ids = list(env.placed_list)  # 放置顺序
+    if not placed_ids:
+        return 0.0
+
+    reward = 0.0
+
+    # ---- 全局品质项：Net 聚合度（终态全集合算一次） ----
+    agg_reward = 0.0
+    for net_id, net in env.nets.items():
+        comp_bboxes = []
+        seen = set()
+        for conn_ref, _ in net.connections:
+            if conn_ref in env.kicad.components and conn_ref not in seen:
+                c = env.kicad.components[conn_ref]
+                if c.is_placed:
+                    seen.add(conn_ref)
+                    comp_bboxes.append(c.bbox)
+        if len(comp_bboxes) >= 2:
+            agg = PCBUtils.net_aggregation(comp_bboxes)
+            agg_score = max(0.0, 1.0 - agg / max(env.board_diagonal, 0.01))
+            agg_reward += agg_score * Config.W_NET_AGGREGATION
+    reward += agg_reward * quality_scale
+
+    # ---- 全局品质项：拥塞均衡度（终态全集合算一次） ----
+    placed_comps = [env.kicad.components[rid] for rid in placed_ids]
+    cong_std = PCBUtils.congestion_std(
+        placed_comps, env.nets, env.valid_area, Config.CONGESTION_CELL_SIZE
+    )
+    max_std = max(1.0, np.sqrt(env.N_movable))
+    cong_score = max(0.0, 1.0 - cong_std / max_std)
+    reward += cong_score * Config.W_CONGESTION * quality_scale
+
+    # ---- 按元件品质项：去耦电容距离 ----
+    decap_reward = 0.0
+    for rid in placed_ids:
+        comp = env.kicad.components[rid]
+        for cap_id in env.decoupling_map.get(comp.id, ()):
+            cap = env.kicad.components.get(cap_id)
+            if cap is not None and cap.is_placed:
+                dist = PCBUtils.min_pin_to_cap_distance(comp, cap)
+                decap_reward += max(
+                    0.0, 1.0 - dist / Config.DECOUPLING_MAX_DIST
+                ) * Config.W_DECOUPLING
+    reward += decap_reward * quality_scale
+
+    # ---- 按元件品质项：大元件排名（按 placed_list 顺序，order_factor 用真实放置序） ----
+    # 注意：env 中 _calculate_reward 在 placed_list.append 之后调用，故放置序为 1-based(order+1)
+    large_comp_reward = 0.0
+    for order, rid in enumerate(placed_ids):
+        comp = env.kicad.components[rid]
+        if comp.id in env.area_ranks:
+            rank = env.area_ranks[comp.id]
+            size_factor = max(0.0, 1.0 - rank / env.N_movable)
+            order_factor = max(0.0, 1.0 - (order + 1) / env.N_movable)
+            large_comp_reward += size_factor * order_factor * Config.W_LARGE_COMP
+    reward += large_comp_reward * quality_scale
+
+    # ---- 完成奖励（全放完一次性发放） ----
+    reward += Config.W_COMPLETION
+
+    # ---- 惩罚项（终态残余碰撞/出界，合法布局应≈0） ----
+    total_hard = total_soft = total_oob = 0.0
+    all_placed = [env.kicad.components[rid] for rid in placed_ids]
+    for comp in all_placed:
+        for other in all_placed + env.fixed_list:
+            if other.id == comp.id:
+                continue
+            # 异层元件物理被板材隔开，不计碰撞（修复：碰撞前提为同层）
+            if not PCBUtils.layers_conflict(comp.layer, other.layer, Config.ENABLE_DUAL_SIDED):
+                continue
+            threshold = Config.spacing_threshold_for(comp.package_type, other.package_type)
+            hard, soft = PCBUtils.bbox_overlap_penalty(comp.bbox, other.bbox, threshold)
+            total_hard += hard
+            total_soft += soft
+        total_oob += PCBUtils.out_of_bounds_area(comp.bbox, env.valid_area)
+    reward -= Config.W_OVERLAP_HARD * total_hard
+    reward -= Config.W_OVERLAP_SOFT * total_soft
+    reward -= env.W_OUT_OF_BOUNDS_CURRENT * total_oob
+
+    return float(reward)
 
 
 def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
@@ -300,7 +408,9 @@ def _replay_best_episode(env, agent, best_actions: list, step_img_dir: str):
 
         _, reward, _, _, _ = env.step(full_action)
         env._reset_pending()
-        cumulative_reward += reward
+        # 仅累加成功放置步的 reward，与 run_inference_episode 口径一致
+        if act.get("is_placed", False):
+            cumulative_reward += reward
 
         # 仅成功放置时生成步骤图
         if not act.get("is_placed", False):
@@ -380,26 +490,29 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
         best_state = None
         best_episode = -1
         best_actions = []
+        best_steps = -1
         all_completed = False
 
         start_time = time.time()
 
         for ep in range(1, MAX_ATTEMPTS + 1):
-            ep_reward, ep_steps, ep_placed, actions = run_inference_episode(
+            ep_reward, ep_steps, ep_placed, actions, final_layout_reward = run_inference_episode(
                 env, agent, inference_epsilon=args.inference_epsilon)
 
-            if ep_reward > best_reward:
-                best_reward = ep_reward
+            # 最佳选择改用终局独立质量分(与重试次数解耦)，而非被失败步污染的 ep_reward
+            if final_layout_reward > best_reward:
+                best_reward = final_layout_reward
                 best_state = snapshot_state(env)
                 best_episode = ep
                 best_actions = actions
+                best_steps = ep_steps
 
             if ep % 50 == 0 or ep_placed == env.N_movable or ep == 1:
                 status = "[COMPLETE]" if ep_placed == env.N_movable else ""
                 logger.info(
-                    f"[Ep {ep:4d}] R={ep_reward:8.2f}  "
+                    f"[Ep {ep:4d}] Quality={final_layout_reward:8.2f}  "
                     f"placed={ep_placed}/{env.N_movable}  "
-                    f"steps={ep_steps:3d}  {status}"
+                    f"attempts={ep_steps:3d}  stepR={ep_reward:8.2f}  {status}"
                 )
 
             if ep_placed == env.N_movable:
@@ -421,7 +534,8 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
 
         # 导出
         logger.info(
-            f"Best: episode={best_episode}, reward={best_reward:.1f}, all_placed={all_completed}"
+            f"Best: episode={best_episode}, quality={best_reward:.1f}, "
+            f"attempts={best_steps}, all_placed={all_completed}"
         )
 
         final_path = os.path.abspath(args.export) if args.export else \
@@ -448,7 +562,9 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
                     "pcb_name": pcb_name,
                     "data_file": os.path.abspath(pcb_path),
                     "episode": best_episode,
+                    "layout_quality": best_reward,
                     "reward": best_reward,
+                    "attempt_steps": best_steps,
                     "all_placed": all_completed,
                     "elapsed_seconds": round(elapsed, 2),
                     "total_attempts": best_episode if all_completed else MAX_ATTEMPTS,
@@ -465,7 +581,7 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
                 )
                 title = (
                     f"Best Layout — {pcb_name}  Ep {best_episode}  "
-                    f"Reward={best_reward:.0f}"
+                    f"Quality={best_reward:.0f}  attempts={best_steps}"
                 )
                 png_path = os.path.join(pcb_output_dir, "best_layout.png")
                 draw_layout(components_for_viz, board_bounds, png_path, title=title)
@@ -538,11 +654,10 @@ def main():
     # ---- 加载模型/创建 Agent（全局一份，所有板子共用） ----
     from env.pcb_layout_env import Config
 
-    # 加载训练超参数（argument.txt）与固定维度（admin.txt），
+    # 加载训练超参与固定维度参数（argument.txt，含 MAX_MOVABLE/GRID_W/GRID_H），
     # 保证推理的 reward 口径与训练一致（如 W_COMPLETION 等权重）
     _config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "config"))
     Config.load_from_file(os.path.join(_config_dir, "argument.txt"))
-    Config.load_dims_from_file(os.path.join(_config_dir, "admin.txt"))
 
     device = torch.device("cpu")
     agent = DQNAgent(

@@ -17,6 +17,7 @@ target 同步频率 / 500ep 预热期全部一致，保证唯一变量原则。
 """
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -25,8 +26,11 @@ import sys
 import torch
 
 from run import Runner
+from dqn import DQNAgent
+from env.pcb_layout_env import Config
+from inference_eval import run_inference_eval
 from utils.pcb_scan import find_pcb_files
-from utils.visualization import plot_loss_compare, plot_reward_compare
+from utils.visualization import plot_loss_compare, plot_reward_compare, plot_inference_eval
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -195,6 +199,31 @@ def _print_summary(
     logger.info("=" * 70)
 
 
+def _load_agent_for_eval(model_path: str, config_path: str, device: str = "cpu") -> "DQNAgent":
+    """加载一个已训模型用于 100 次推理评测（与 run_inference.py::main 同范式）。
+
+    Args:
+        model_path: best_model.pt 路径
+        config_path: 训练用 config（保证网络维度与 reward 权重口径一致）
+        device: 推理设备（默认 cpu）
+
+    Returns:
+        已加载权重的 DQNAgent
+    """
+    Config.load_from_file(config_path)
+    agent = DQNAgent(
+        n_movable=Config.MAX_MOVABLE,
+        grid_w=Config.GRID_W,
+        grid_h=Config.GRID_H,
+        device=device,
+        lr=Config.LEARNING_RATE,
+        gamma=Config.GAMMA,
+    )
+    agent.load(model_path)
+    logger.info(f"[inference_eval] Agent loaded weights from: {model_path}")
+    return agent
+
+
 def run():
     """主入口：顺序跑 A/B 两组训练 → 画对比图 → 打印汇总。"""
     args = get_config()
@@ -277,6 +306,88 @@ def run():
         )
 
         _print_summary(pcb_short, reward_a, reward_b)
+
+        # ---- 100 次推理评测（对比实验新评测标准）----
+        # 对 A/B 各自 best_model.pt 各跑 100 次独立贪心推理，记录每条最终结果
+        # （完成度 / 尝试次数 / reward），存原始 JSON 并画 A/B 三合一分布对比图。
+        try:
+            eval_root = os.path.join(board_out_dir, "inference_eval")
+            os.makedirs(eval_root, exist_ok=True)
+            eval_records: dict = {}
+
+            for group, save_dir in (("with_expert", save_dir_a), ("baseline", save_dir_b)):
+                model_path = os.path.join(save_dir, "best_model.pt")
+                if not os.path.isfile(model_path):
+                    logger.warning(
+                        f"[inference_eval] 跳过 {group}：找不到模型 {model_path}"
+                    )
+                    continue
+                agent = _load_agent_for_eval(model_path, args.config_path, device="cpu")
+                logger.info("=" * 70)
+                logger.info(
+                    f"==== 100 次推理评测：{group} ({pcb_short}) ===="
+                )
+                logger.info("=" * 70)
+                rec = run_inference_eval(
+                    _filepath, agent, n=100, inference_epsilon=0.01
+                )
+                eval_records[group] = rec
+
+                grp_dir = os.path.join(eval_root, group)
+                os.makedirs(grp_dir, exist_ok=True)
+                with open(
+                    os.path.join(grp_dir, "inference_eval.json"),
+                    "w", encoding="utf-8",
+                ) as f:
+                    json.dump(rec, f, indent=2, ensure_ascii=False)
+
+                s = rec["stats"]
+                logger.info(
+                    f"[inference_eval] {group}: "
+                    f"完整放置率={s['full_place_rate']:.2%}  "
+                    f"平均完成度={s['completion_ratio']['mean']:.3f}  "
+                    f"平均Reward={s['rewards']['mean']:.2f}  "
+                    f"平均尝试={s['attempts']['mean']:.2f}"
+                )
+
+            # A/B 都成功评测才画对比图 + 打印结论
+            if "with_expert" in eval_records and "baseline" in eval_records:
+                plot_inference_eval(
+                    eval_records["with_expert"],
+                    eval_records["baseline"],
+                    pcb_short,
+                    os.path.join(eval_root, "inference_eval_compare.png"),
+                )
+                sa = eval_records["with_expert"]["stats"]
+                sb = eval_records["baseline"]["stats"]
+                logger.info("=" * 70)
+                logger.info(f"[{pcb_short}] 100 次推理评测对比")
+                logger.info(
+                    f"  完整放置率: A={sa['full_place_rate']:.2%}  "
+                    f"B={sb['full_place_rate']:.2%}  "
+                    f"Δ={sa['full_place_rate'] - sb['full_place_rate']:+.2%}"
+                )
+                logger.info(
+                    f"  平均完成度: A={sa['completion_ratio']['mean']:.3f}  "
+                    f"B={sb['completion_ratio']['mean']:.3f}"
+                )
+                logger.info(
+                    f"  平均 Reward: A={sa['rewards']['mean']:.2f}  "
+                    f"B={sb['rewards']['mean']:.2f}  "
+                    f"Δ={sa['rewards']['mean'] - sb['rewards']['mean']:+.2f}"
+                )
+                # 对比口径：reward 用 100 次推理的整体平均 reward
+                da = sa["rewards"]["mean"]
+                db = sb["rewards"]["mean"]
+                if da - db > 0:
+                    logger.info("  初步结论: 伪造轨迹有效（A 组平均Reward更高）")
+                else:
+                    logger.info("  初步结论: 伪造轨迹无效 / 无明显提升（A 组未优于B组）")
+                logger.info("=" * 70)
+        except Exception:
+            logger.exception(
+                "[inference_eval] 评测失败（不影响对比实验训练主结论），跳过"
+            )
 
     if failed_groups:
         logger.error(f"以下组训练失败，对比不完整: {failed_groups}")

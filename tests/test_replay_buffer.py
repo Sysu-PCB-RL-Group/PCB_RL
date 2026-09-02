@@ -13,8 +13,12 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from dqn.replay_buffer import ReplayBuffer
 
 
-def _make_obs(dim: int = 10) -> np.ndarray:
-    return np.random.randn(dim).astype(np.float32)
+def _make_obs(n_slots: int = 10) -> dict:
+    rng = np.random.default_rng(0)
+    return {
+        "component_slots": rng.standard_normal((n_slots, 8)).astype(np.float32),
+        "global_features": rng.standard_normal(8).astype(np.float32),
+    }
 
 
 def test_add_and_len():
@@ -59,10 +63,12 @@ def test_sample_shapes():
         buf.add(obs, i % 3, 1.0 if sid == 4 else 0.0,
                 obs, np.ones(5, dtype=bool), False, sid, sid + 1 if sid < 4 else 0)
     batch = buf.sample(8)
-    assert batch[0].shape == (8, obs_dim)     # obs
+    assert batch[0]["component_slots"].shape == (8, obs_dim, 8)   # obs
+    assert batch[0]["global_features"].shape == (8, 8)
     assert batch[1].shape == (8,)              # actions
     assert batch[2].shape == (8,)              # rewards
-    assert batch[3].shape == (8, obs_dim)      # next_obs
+    assert batch[3]["component_slots"].shape == (8, obs_dim, 8)   # next_obs
+    assert batch[3]["global_features"].shape == (8, 8)
     assert len(batch[4]) == 8                  # masks (list)
 
 
