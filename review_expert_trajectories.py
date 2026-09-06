@@ -4,12 +4,14 @@
   A. 结构：每条 transition 含 8 字段且类型正确
   B. step 序列：step_id == [0,1,2,3,4] 连续，末步 done==True
   C. obs/next_obs 自洽：末步 comp_idx 在 next_obs 中 placed=1，且其量化重建 bbox/rot/layer
-     与 action 解码（valid_area + gx1*CELL + dims_at_rotation）一致；逐步已放置元件坐标不变
+     与 action 解码（valid_area + gx1*CELL + footprint 基准）一致；逐步已放置元件坐标不变
+     （合并 S4/S5 后专家/环境重建统一 footprint 基准，不做旋转交换）
   D. 硬重叠：每个 obs 的已放置元件两两 AABB 不重叠
   E. 越界：所有已放置元件 bbox 在 valid_area 内
   F. mask 合法：action 在对应 step 的 mask 允许集合内（mask None 即无约束）
   G. reward：有限；rewards[i] ≈ sum_r * EXPERT_SHARE_WEIGHTS[i]（Σ=1.0）；
-     sum_r(=expert_reward) 应 >0，标记 sum_r<5 的低质（疑似违规）轨迹
+     sum_r 为单步 expert_reward ÷W_COMPLETION 之和（完成全板≈1.0），
+     标记 sum_r<0.05 的低质（疑似违规）轨迹
 
 用法：
   $env:KICAD_PATH="E:\Kicad"
@@ -99,7 +101,8 @@ def review(pcb_path, env):
         if next_cs[comp_idx, 0] != 1.0:
             bump("comp_not_placed")
         else:
-            tw, th = env.movable_list[comp_idx].dims_at_rotation(rot)
+            tw = env.movable_list[comp_idx].footprint_w
+            th = env.movable_list[comp_idx].footprint_h
             x1 = va[0] + gx1 * cell
             y1 = va[1] + gy1 * cell
             x2, y2 = x1 + tw, y1 + th
@@ -156,7 +159,7 @@ def review(pcb_path, env):
                 bump("share_mismatch")
                 break
         reward_stats.append(sum_r)
-        if sum_r < 5.0:
+        if sum_r < 0.05:
             low_quality += 1
 
     return {
@@ -182,7 +185,7 @@ def main():
         r = review(pcb_path, env)
         print(f"  可用轨迹总数: {r['total_trajs']} | 抽查: {r['sampled']}")
         print(f"  异常统计: {r['issues'] if r['issues'] else '无'}")
-        print(f"  低质轨迹(sum_r<5): {r['low_quality']}")
+        print(f"  低质轨迹(sum_r<0.05): {r['low_quality']}")
         if r["reward_min"] is not None:
             print(
                 f"  expert_reward(sum): min={r['reward_min']:.2f} "
