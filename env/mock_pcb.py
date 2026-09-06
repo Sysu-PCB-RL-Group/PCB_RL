@@ -35,6 +35,9 @@ class MockComponent:
     # 默认值对齐 kicad_utils.Component（0.0），避免遗漏字段时产生假数据
     footprint_w: float = 0.0
     footprint_h: float = 0.0
+    # 焊盘层事实（与 kicad_utils.Component 对齐；默认宽松，JSON 未透传时不崩）
+    pad_layers: Tuple[int, ...] = (0, 1)
+    has_pth: bool = False
     source_rotation: int = 0
     source_bbox: Tuple[float, float, float, float] = field(default_factory=tuple)
     # 惰性构建：第一次访问 pin_abs_positions 时按 rotation 矩阵计算
@@ -43,6 +46,15 @@ class MockComponent:
     @property
     def footprint_area(self) -> float:
         return self.footprint_w * self.footprint_h
+
+    @property
+    def allowed_layers(self) -> Tuple[int, ...]:
+        """物理可放置层：PTH 双面自由；纯 SMD 锁定焊盘所在面；无焊盘默认宽松。"""
+        if self.has_pth:
+            return (0, 1)
+        if not self.pad_layers:
+            return (0, 1)
+        return tuple(sorted(set(self.pad_layers)))
 
     @property
     def center(self) -> Tuple[float, float]:
@@ -428,6 +440,8 @@ def load_pcb_from_json(json_path: str) -> MockKiCadUtils:
             pins=[tuple(p) for p in comp_data.get("pins", [])],
             footprint_w=comp_data.get("footprint_w", 0.0),
             footprint_h=comp_data.get("footprint_h", 0.0),
+            pad_layers=tuple(sorted(comp_data.get("pad_layers", (0, 1)))),
+            has_pth=bool(comp_data.get("has_pth", False)),
             source_rotation=comp_data.get("source_rotation", 0),
             source_bbox=tuple(comp_data.get("source_bbox", comp_data.get("bbox", (0.0, 0.0, 0.0, 0.0)))),
         )

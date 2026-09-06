@@ -89,6 +89,10 @@ class Component:
     pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]] = field(default_factory=dict)
     # pin_offsets_by_rotation[r]: [(ox, oy), ...] 旋转 r 下各 pad 相对该旋转 bbox 中心的偏移 (mm)
     #   顺序与 pins 一致；由 _cache_components 用真实 KiCad 几何预计算（含旋转）
+    # 焊盘层事实（0=F.Cu, 1=B.Cu，去重）：从 footprint pad 层集合解析，
+    # 与原始布局无关，未来可从封装库 footprint 直接推导。
+    pad_layers: Tuple[int, ...] = (0, 1)
+    has_pth: bool = False                            # 是否有通孔焊盘（PTH/NPTH 贯穿所有铜层）
 
     @property
     def footprint_area(self) -> float:
@@ -133,6 +137,20 @@ class Component:
             (num, cx + ox, cy + oy)
             for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)
         ]
+
+    @property
+    def allowed_layers(self) -> Tuple[int, ...]:
+        """物理可放置层：PTH 双面自由；纯 SMD 锁定焊盘所在面；无焊盘默认宽松。
+
+        footprint 翻转在 KiCad 语义下是合法操作（pad 镜像跟随），故此约束不
+        "禁止翻面"，而是提供层动作候选集——配合 env 的 SINGLE_LAYER 任务开关
+        共同决定最终可行动作集。
+        """
+        if self.has_pth:
+            return (0, 1)
+        if not self.pad_layers:
+            return (0, 1)
+        return tuple(sorted(set(self.pad_layers)))
 
 
 @dataclass
@@ -319,6 +337,8 @@ class KiCadUtils:
             # 下游取绝对坐标须经 pin_abs_positions()（随旋转更新），不要直接用
             # bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
             pins = []
+            pad_layers = set()
+            has_pth = False
             for pad in fp.Pads():
                 pad_pos_nm = pad.GetPosition()
                 pad_pos_mm = (
@@ -328,6 +348,23 @@ class KiCadUtils:
                 rel_x = pad_pos_mm[0] - bbox_mm[0]
                 rel_y = pad_pos_mm[1] - bbox_mm[1]
                 pins.append((pad.GetNumber(), rel_x, rel_y))
+
+            # 焊盘层事实（feat）：遍历 pads 解析 pad_layers/has_pth。
+            # SMD=单层（F.Cu 或 B.Cu），PTH/NPTH=贯穿所有铜层；解析失败保持宽松
+            # （仅影响层动作候选集，不影响电气功能）。
+            for pad in fp.Pads():
+                try:
+                    attr = pad.GetAttribute()
+                    if attr in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+                        has_pth = True
+                    for lay_id in pad.GetLayerSet().Seq():
+                        name = pcbnew.LayerName(lay_id)
+                        if name == "F.Cu":
+                            pad_layers.add(0)
+                        elif name == "B.Cu":
+                            pad_layers.add(1)
+                except Exception:
+                    pass
 
             # 预计算 4 个旋转下各 pad 相对该旋转 bbox 中心的偏移（真实 KiCad 几何）。
             # 方法：临时设置 footprint 旋转 → 读 hull bbox 中心与 pad 世界坐标
@@ -371,6 +408,8 @@ class KiCadUtils:
                 source_rotation=rotation,
                 source_bbox=bbox_mm,
                 pin_offsets_by_rotation=pin_offsets_by_rotation,
+                pad_layers=tuple(sorted(pad_layers)),
+                has_pth=has_pth,
             )
 
     @staticmethod
@@ -595,6 +634,15 @@ class KiCadUtils:
                 # ② 层守卫：非标准层（内层等）不移动、不写层
                 if comp.layer not in (0, 1):
                     print(f"[WARN] {ref} 在非标准层 {comp.layer}，跳过导出")
+                    continue
+
+                # ②-2 物理层守卫：footprint 不允许的层不写（防御；正常训练流
+                # 已被 env 层 mask 挡死，此处兜底防异常路径/手工构造数据）
+                if comp.layer not in comp.allowed_layers:
+                    print(
+                        f"[WARN] {ref} 层 {comp.layer} 不在物理允许层 "
+                        f"{comp.allowed_layers}，跳过导出"
+                    )
                     continue
 
                 # AABB → 目标中心点坐标 (mm)

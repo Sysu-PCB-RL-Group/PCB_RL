@@ -61,6 +61,7 @@ class ExpertTrajectoryGenerator:
         epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
         pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
         rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
+        apply_penalties: bool = True,
     ):
         """初始化生成器。
 
@@ -70,13 +71,18 @@ class ExpertTrajectoryGenerator:
             epsilon_decompose: 拆解随机化概率（50% 随机选 / 50% 选最小面积）
             pos_noise_prob: 位置变异概率（±1~2 格偏移）
             rot_noise_prob: 旋转变异概率（全 4 种旋转）
+            apply_penalties: 专家 reward 是否携带硬重叠/软间距/出界惩罚项；
+                True=与 RL 环境一致，False=仅品质奖励（对照实验用，透传 env._calculate_reward）
         """
         self.total_transitions = total_transitions
         self.max_trajectories = max_trajectories
         self.epsilon_decompose = epsilon_decompose
         self.pos_noise_prob = pos_noise_prob
         self.rot_noise_prob = rot_noise_prob
-        self._placed_soft_steps = 0  # 方案Y安全阀：最终放置 soft>0 的步数统计
+        self.apply_penalties = apply_penalties
+        # 诊断计数：最终放置 soft>0 的步数（S3=off 下 soft 不构成违规，仅反映
+        # 源完美布局量化后的固有紧贴率）
+        self._placed_soft_steps = 0
 
     # ==================== 核心：反向拆解 ====================
 
@@ -280,7 +286,7 @@ class ExpertTrajectoryGenerator:
             if other_id == comp_id:
                 continue
             # 异层元件物理被板材隔开，不计碰撞（修复：碰撞前提为同层）
-            if not PCBUtils.layers_conflict(self_layer, other_state["layer"], Config.ENABLE_DUAL_SIDED):
+            if other_state.get("layer", self_layer) != self_layer:
                 continue
             other_bbox = other_state["bbox"]
             other_pkg = other_state.get("package_type", 0)
@@ -379,6 +385,13 @@ class ExpertTrajectoryGenerator:
             target_bbox = mutated["bbox"]
             target_rotation = mutated["rotation"]
             target_layer = mutated["layer"]
+
+            # 层防御兜底：变异层若不在 SINGLE_LAYER/footprint 允许集内，回退原始层。
+            # 专家轨迹本"层严格继承原始层"（_mutate_component_state 不变异层），此处
+            # 兜底防止未来放开层变异/外部数据导致的非法层（与 env._allowed_layers_of 同口径）。
+            comp_ref = env.movable_list[comp_idx]
+            if target_layer not in env._allowed_layers_of(comp_ref):
+                target_layer = comp_target["layer"]
 
             # 关键修复：变异产生连续坐标 bbox，而 reward/next_obs 用量化坐标。
             # 必须把目标 bbox 量化对齐到网格，否则 ±0.1mm 量化误差会在软间距
@@ -563,9 +576,9 @@ class ExpertTrajectoryGenerator:
                 cell_size = Config.CELL_SIZE
                 x1 = env.valid_area[0] + expert_actions[1] * cell_size
                 y1 = env.valid_area[1] + expert_actions[2] * cell_size
-                # 按目标旋转的真实尺寸重建 bbox（宽高随旋转交换）
-                tw, th = comp.dims_at_rotation(expert_actions[3])
-                comp.bbox = (x1, y1, x1 + tw, y1 + th)
+                # 与 env.step 的 AABB 校验/放置同口径：尺寸取 footprint_w/h 基准
+                #（env._assemble_action 同样以 footprint_w/h 生成 gx2/gy2）。
+                comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
                 comp.rotation = expert_actions[3]
                 comp.layer = expert_actions[4]
                 comp.is_placed = True
@@ -576,7 +589,11 @@ class ExpertTrajectoryGenerator:
                 next_sid = 0 if not done else -1
                 step_done = done
 
-            step_reward = expert_reward * share_weights[i]
+            # 雷1修复：专家 reward 与 RL 普通经验同口径归一化（÷W_COMPLETION）。
+            # 修复前专家样本(≈3.88=19.4×0.2)与 RL 普通样本(≈0.039=1.96/100×0.2)
+            # 量纲差 100 倍，Phase 2 每 batch 混采时 Q 的 MSE 目标尺度矛盾，训练震荡。
+            # 修复后专家/普通样本 reward 统一到 [0,~2] 量级。
+            step_reward = expert_reward / Config.W_COMPLETION * share_weights[i]
             transitions.append((
                 self._copy_obs(obs_list[i]),
                 actions[i],
@@ -617,26 +634,20 @@ class ExpertTrajectoryGenerator:
         cell_size = Config.CELL_SIZE
         x1 = env.valid_area[0] + expert_actions[1] * cell_size
         y1 = env.valid_area[1] + expert_actions[2] * cell_size
-        # 按目标旋转的真实尺寸重建 bbox（宽高随旋转交换）
-        tw, th = comp.dims_at_rotation(expert_actions[3])
-        comp.bbox = (x1, y1, x1 + tw, y1 + th)
+        # 与 env.step 的 AABB 校验/放置同口径：尺寸取 footprint_w/h 基准。
+        comp.bbox = (x1, y1, x1 + comp.footprint_w, y1 + comp.footprint_h)
         comp.rotation = expert_actions[3]
         comp.layer = expert_actions[4]
 
         try:
             total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
                 env._detect_collisions(comp)
-            # 方案Y安全阀：变异紧贴已被 _is_legal_placement(check_soft=True) 回退，
-            # 此处 soft>0 仅来自源完美布局量化后的固有软间距，应极少。
+            # S3=off：软间距不构成违规，仅作连续惩罚（与 env.step 的 has_violations 同口径）。
+            # soft>0 来自源完美布局量化后的固有紧贴，计数仅用于诊断。
             if total_soft_spacing > 0.0:
                 self._placed_soft_steps += 1
-            # 与训练侧 env.step (L381-386) 同口径：紧贴(soft>0)也计入违规，该步扣
-            # W_VIOLATION_FLAT 且不发品质项。当前零软间距数据重生成后 has_violations
-            # 仍为 False -> reward 数值不变；仅消除结构性不对称，并让未来含紧贴的样本
-            # 自动对齐（2026-09-05 用户决策：推翻方案Y"不把 soft 计入 has_violations"）。
             has_violations = (
                 total_hard_overlap > 0.0
-                or total_soft_spacing > 0.0
                 or total_out_of_bounds > 0.0
                 or in_keepout
             )
@@ -647,6 +658,7 @@ class ExpertTrajectoryGenerator:
                 total_out_of_bounds,
                 has_violations,
                 quality_scale=1.0,
+                apply_penalties=self.apply_penalties,
             )
         finally:
             comp.bbox, comp.rotation, comp.layer = saved
@@ -794,8 +806,8 @@ class ExpertTrajectoryGenerator:
 
         x1 = va_xmin + gx1 * cell_size
         y1 = va_ymin + gy1 * cell_size
-        # 只把原点对齐到网格，宽高保持传入 bbox 不变（由调用方用
-        # dims_at_rotation(target_rot) 重建，保证与 reward/next_obs 一致）
+        # 只把原点对齐到网格，宽高保持传入 bbox 不变（env.step / 专家重建均以
+        # footprint_w/h 为基准，见 _build_step_transitions 与 _compute_expert_reward）
         return (gx1, gy1, (x1, y1, x1 + w, y1 + h))
 
     def _copy_obs(self, obs: dict) -> dict:
@@ -956,9 +968,9 @@ class ExpertTrajectoryGenerator:
             f"(target={self.total_transitions}, buffer_capacity={buffer_capacity})"
         )
         logger.info(
-            f"[{pcb_name}] 方案Y安全阀 最终放置软间距步数: {self._placed_soft_steps} "
-            f"/ {len(all_transitions)} ({soft_ratio:.2f}%) —— 应≈源布局量化固有soft；"
-            f"若异常高(>5%)说明源完美布局量化后间隙偏小，需查 spacing_threshold"
+            f"[{pcb_name}] 最终放置 soft>0 步数: {self._placed_soft_steps} "
+            f"/ {len(all_transitions)} ({soft_ratio:.2f}%) —— S3=off 下不构成违规，"
+            f"仅反映源布局量化固有紧贴；若异常高(>5%)说明源完美布局量化后间隙偏小"
         )
         return all_transitions, all_raw
 
@@ -1078,6 +1090,7 @@ def generate_and_save_expert_transitions(
     epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
     pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
     rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
+    apply_penalties: bool = True,
 ) -> Tuple[List[Tuple], str]:
     """便捷函数：生成并保存一块 PCB 的专家 transition。
 
@@ -1090,6 +1103,7 @@ def generate_and_save_expert_transitions(
         epsilon_decompose: 拆解随机化概率
         pos_noise_prob: 位置变异概率
         rot_noise_prob: 旋转变异概率
+        apply_penalties: 专家 reward 是否携带惩罚项（透传给生成器，对照实验 D 用）
 
     Returns:
         (transitions, filepath) 元组
@@ -1100,6 +1114,7 @@ def generate_and_save_expert_transitions(
         epsilon_decompose=epsilon_decompose,
         pos_noise_prob=pos_noise_prob,
         rot_noise_prob=rot_noise_prob,
+        apply_penalties=apply_penalties,
     )
 
     transitions, all_raw = generator.generate_all_expert_transitions(env, pcb_name)

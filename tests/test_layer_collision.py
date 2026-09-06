@@ -1,9 +1,9 @@
-"""层感知碰撞修复测试。
+"""层感知碰撞测试（合并 S2 采纳 feat：层=严格同层过滤 + allowed_layers）。
 
 覆盖：
-- PCBUtils.layers_conflict 纯函数语义（全部层组合 + 开关）。
-- 训练主路径 _detect_collisions 接入同层过滤（含 layer==2 隔离、开关回退）。
+- 训练主路径 _detect_collisions 同层才判（含 layer==2 与表层隔离、同层保守）。
 - 终局主指标 evaluate_final_layout 对异层重叠不罚、同层罚。
+- Config 数值型 key 不被 "true/false" 污染。
 
 通过 sys.modules 注入 MockKiCadUtils，避免本环境无 pcbnew 时导入失败；
 fixture 为 data/模拟/pcb_dual_layer.json（A=TOP/B=BOTTOM/C,D=内层，均同 XY 重叠）。
@@ -64,37 +64,7 @@ def _place(env, comp_id, bbox, layer):
     return c
 
 
-# ==================== 纯函数：layers_conflict ====================
-
-def test_layers_conflict_top_vs_bottom_false():
-    assert PCBUtils.layers_conflict(0, 1, True) is False
-    assert PCBUtils.layers_conflict(1, 0, True) is False
-
-
-def test_layers_conflict_same_layer_true():
-    assert PCBUtils.layers_conflict(0, 0, True) is True
-    assert PCBUtils.layers_conflict(1, 1, True) is True
-
-
-def test_layers_conflict_layer2_vs_surface_false():
-    # 内层/埋入件与表层元件隔离
-    assert PCBUtils.layers_conflict(2, 0, True) is False
-    assert PCBUtils.layers_conflict(2, 1, True) is False
-    assert PCBUtils.layers_conflict(0, 2, True) is False
-
-
-def test_layers_conflict_layer2_vs_layer2_true():
-    # 两个内层件按同层保守处理
-    assert PCBUtils.layers_conflict(2, 2, True) is True
-
-
-def test_layers_conflict_dual_sided_off_ignores_layer():
-    # 开关关闭：回退旧行为（忽略层，全部按同层）
-    assert PCBUtils.layers_conflict(0, 1, False) is True
-    assert PCBUtils.layers_conflict(2, 0, False) is True
-
-
-# ==================== 集成：_detect_collisions 同层过滤 ====================
+# ==================== 集成：_detect_collisions 同层过滤（feat 严格同层） ====================
 
 def test_detect_collisions_cross_layer_no_penalty():
     env = _make_dual_env()
@@ -129,19 +99,6 @@ def test_detect_collisions_layer2_vs_layer2_conflict():
     assert hard > 0.0, "两个内层件应保守判冲突"
 
 
-def test_detect_collisions_dual_sided_off_legacy_behavior():
-    env = _make_dual_env()
-    _place(env, "A", (10, 10, 20, 20), 0)
-    B = _place(env, "B", (10, 10, 20, 20), 1)
-    prev = Config.ENABLE_DUAL_SIDED
-    Config.ENABLE_DUAL_SIDED = False
-    try:
-        hard, soft, oob, keep = env._detect_collisions(B)
-    finally:
-        Config.ENABLE_DUAL_SIDED = prev
-    assert hard > 0.0, "开关关闭应回退旧行为(忽略层误判冲突)"
-
-
 # ==================== 集成：终局主指标 evaluate_final_layout ====================
 
 def test_evaluate_final_layout_cross_layer_clean():
@@ -164,20 +121,18 @@ def test_evaluate_final_layout_cross_layer_clean():
 # ==================== 修复回归：Config bool 类型守卫 + 缺层 fail-loud ====================
 
 def test_config_bool_type_guard_keeps_numeric():
-    """数值型配置误写为 true/false 不应被静默解析为 bool（保留原 int），
-    同时真正的 bool 开关 ENABLE_DUAL_SIDED 仍正确解析。"""
+    """数值型配置误写为 true/false 不应被静默解析为 bool（保留原 int）。"""
     import tempfile
 
-    prev = (Config.REPLAY_BUFFER_SIZE, Config.ENABLE_DUAL_SIDED)
+    prev = Config.REPLAY_BUFFER_SIZE
     tf = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
-    tf.write("REPLAY_BUFFER_SIZE = true\nENABLE_DUAL_SIDED = False\n")
+    tf.write("REPLAY_BUFFER_SIZE = true\n")
     tf.close()
     try:
         Config.load_from_file(tf.name)
-        assert Config.REPLAY_BUFFER_SIZE == prev[0], "数值型 true 不应静默污染 REPLAY_BUFFER_SIZE"
-        assert Config.ENABLE_DUAL_SIDED is False, "ENABLE_DUAL_SIDED=False 应正确解析为 bool"
+        assert Config.REPLAY_BUFFER_SIZE == prev, "数值型 true 不应静默污染 REPLAY_BUFFER_SIZE"
     finally:
-        Config.REPLAY_BUFFER_SIZE, Config.ENABLE_DUAL_SIDED = prev
+        Config.REPLAY_BUFFER_SIZE = prev
         os.unlink(tf.name)
 
 

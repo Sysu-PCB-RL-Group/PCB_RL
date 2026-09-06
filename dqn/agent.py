@@ -1,4 +1,4 @@
-"""DQN Agent：epsilon-greedy 选择 + 按 step_id 路由学习 + target 同步 + BC 预训练。
+﻿"""DQN Agent：epsilon-greedy 选择 + 按 step_id 路由学习 + target 同步 + BC 预训练。
 
 基于 SPEC v2.3：Dict 观测 + 共享 slot encoder 网络。
 Target 端掩码与 Actor 侧对称：

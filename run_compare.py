@@ -86,6 +86,10 @@ def get_config() -> argparse.Namespace:
         "--device", type=str, default=None,
         help="计算设备 (cpu / cuda)，None 则自动选择",
     )
+    parser.add_argument(
+        "--mrv_order", action="store_true",
+        help="路线3：开启 MRV 顺序约束（step0 只放行剩余合法落子最少的元件，需重训）",
+    )
     return parser.parse_args()
 
 
@@ -144,6 +148,7 @@ def _build_runner_args(
         use_expert=use_expert,
         # 对比实验无需保存 final_ep*.pt 中间 checkpoint，保持产物干净
         explicit_total_episodes=False,
+        mrv_order=getattr(args, "mrv_order", False),
     )
 
 

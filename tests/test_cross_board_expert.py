@@ -22,8 +22,8 @@ if ROOT not in sys.path:
 import run  # noqa: E402
 from run import Runner, EXPERT_SAMPLE_SEED  # noqa: E402
 
-TOTAL = 70000  # EXPERT_TOTAL_TRANSITIONS 默认派生值
-CACHE = 70020  # 旧缓存每板条数
+TOTAL = 20000  # EXPERT_TOTAL_TRANSITIONS（合并 S6 采纳 feat：总buffer×0.2）
+CACHE = 20020  # 旧缓存每板条数
 
 
 def _alloc(total, n):
@@ -62,6 +62,7 @@ class _FakeEnv:
 def _make_runner(n_boards):
     runner = Runner.__new__(Runner)  # 不调用 __init__，避免加载 KiCad/配置
     runner.use_expert = True
+    runner._expert_transitions_dir_override = ""  # 对应合并后 run.py __init__ 字段
     pool = [(f"b{k}.kicad_pcb", None) for k in range(n_boards)]
     runner.pcb_pool = pool
     runner.envs = {name: _FakeEnv() for name, _ in pool}
@@ -111,6 +112,7 @@ def test_generate_branch_per_board_split(tmp_path, monkeypatch):
 def test_empty_pool_returns_empty():
     runner = Runner.__new__(Runner)
     runner.use_expert = True
+    runner._expert_transitions_dir_override = ""
     runner.pcb_pool = []
     runner.envs = {}
     runner.expert_transitions_dir = "data/expert_transitions"

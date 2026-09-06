@@ -23,26 +23,21 @@ class PCBUtils:
         a: Tuple[float, float, float, float],
         b: Tuple[float, float, float, float],
         spacing_threshold: float,
-        soft_ref_depth: float = 1.0,
     ) -> Tuple[float, float]:
         """计算两个 AABB 之间的碰撞惩罚。
 
-        同时返回硬重叠面积 (mm²) 和软间距惩罚 (mm²)。
-        两者同为 mm² 量纲，可直接由对应权重比较标定。
+        同时返回硬重叠面积和软间距惩罚。
 
         Args:
             a: (x1, y1, x2, y2) AABB 包围盒
             b: (x1, y1, x2, y2) AABB 包围盒
             spacing_threshold: 分类间距阈值 (mm)，由调用方从两个元件的
                                package_type 查表后取 max 传入
-            soft_ref_depth: 软间距等效穿透深度 (mm)，把"间距不足"折算为
-                            该深度的重叠面积；默认 1.0
 
         Returns:
             (hard_overlap, soft_spacing):
             hard_overlap: 物理交叉面积 (mm²)，>0 表示硬重叠
-            soft_spacing: 间隙 < spacing_threshold 时的连续惩罚值 (mm²)，
-                          0 表示不惩罚；gap->0 时趋近 edge × soft_ref_depth
+            soft_spacing: 间隙 < spacing_threshold 时的连续惩罚值，0 表示不惩罚
         """
         dx = min(a[2], b[2]) - max(a[0], b[0])
         dy = min(a[3], b[3]) - max(a[1], b[1])
@@ -63,32 +58,8 @@ class PCBUtils:
         if gap >= spacing_threshold:
             return (0.0, 0.0)
 
-        # 软间距连续惩罚（归一化线性，mm² 量纲，与硬重叠统一）：
-        # ((threshold - gap) / threshold) × edge × soft_ref_depth
-        # 阈值缩放不再塌缩（只取决于相对缺口）；gap->0 时趋近 edge × soft_ref_depth
-        return (0.0, (spacing_threshold - gap) / spacing_threshold * edge * soft_ref_depth)
-
-    # ========== 层冲突语义（双面贴装） ==========
-
-    @staticmethod
-    def layers_conflict(layer_a: int, layer_b: int, dual_sided: bool = True) -> bool:
-        """判定两元件是否可能因 XY 重叠而冲突（即是否需继续做 AABB 碰撞检测）。
-
-        仅同层元件之间才判定碰撞；异层（TOP/BOTTOM）物理上被板材隔开，
-        即使 XY 完全重叠也不冲突。layer==2 为内层/埋入元件，不移动、不导出，
-        与表层元件隔离；两个 layer==2 之间按同层保守处理。
-
-        Args:
-            layer_a: 元件 A 的层编码 (0=TOP, 1=BOTTOM, 2=内层/未知)
-            layer_b: 元件 B 的层编码
-            dual_sided: 是否启用双面隔离；False 时回退旧行为（忽略层，全部按同层）
-
-        Returns:
-            True 表示需要继续做 bbox 碰撞检测；False 表示物理隔绝，可直接跳过。
-        """
-        if not dual_sided:
-            return True  # 旧行为：忽略层
-        return layer_a == layer_b
+        # 软间距连续惩罚：(threshold - gap)² × edge
+        return (0.0, (spacing_threshold - gap) ** 2 * edge)
 
     # ========== C3：板框约束 ==========
 
@@ -240,12 +211,13 @@ class PCBUtils:
         ic_cx, ic_cy = ic.center
         cap_cx, cap_cy = cap.center
 
-        # 收集 IC 所有引脚的绝对坐标。
-        # 必须用 ic.pin_abs_positions()（相对当前 bbox 中心 + 该旋转的预计算偏移），
-        # 不能用 bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
+        # 收集 IC 所有引脚的绝对坐标
         # TODO: 待 kicad_utils 支持 pin→net 映射后，改为仅过滤电源网络引脚
-        pin_abs_positions = [(abs_x, abs_y)
-                             for _pin_num, abs_x, abs_y in ic.pin_abs_positions()]
+        pin_abs_positions = []
+        for pin_num, rel_x, rel_y in ic.pins:
+            abs_x = ic.bbox[0] + rel_x
+            abs_y = ic.bbox[1] + rel_y
+            pin_abs_positions.append((abs_x, abs_y))
 
         if not pin_abs_positions:
             # 无法获取引脚坐标 → 退化为中心点距离

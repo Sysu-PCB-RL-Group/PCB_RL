@@ -358,7 +358,7 @@ def evaluate_final_layout(env) -> float:
             if other.id == comp.id:
                 continue
             # 异层元件物理被板材隔开，不计碰撞（修复：碰撞前提为同层）
-            if not PCBUtils.layers_conflict(comp.layer, other.layer, Config.ENABLE_DUAL_SIDED):
+            if comp.layer != other.layer:
                 continue
             threshold = Config.spacing_threshold_for(comp.package_type, other.package_type)
             hard, soft = PCBUtils.bbox_overlap_penalty(comp.bbox, other.bbox, threshold)
@@ -634,6 +634,15 @@ def main():
         "--inference-epsilon", type=float, default=0.01,
         help="贪心推理时的探索率（打破确定性死锁，默认 0.01；调高如 0.15 可公平评估策略）",
     )
+    parser.add_argument(
+        "--deadlock-preview", action="store_true",
+        help="开启 1c 防死锁前瞻预演（forward checking）：落子前检查剩余元件仍可行",
+    )
+    parser.add_argument(
+        "--mrv-order", action="store_true",
+        help="路线3：开启 MRV 顺序约束（step0 只放行剩余合法落子最少的元件；"
+             "需与训练同开，仅用于对应重训模型的推理）",
+    )
     args = parser.parse_args()
 
     # ---- 确定 PCB 文件列表 ----
@@ -658,6 +667,14 @@ def main():
     # 保证推理的 reward 口径与训练一致（如 W_COMPLETION 等权重）
     _config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "config"))
     Config.load_from_file(os.path.join(_config_dir, "argument.txt"))
+    # feat 引入的推理端开关：1c 防死锁前瞻 / MRV 顺序约束（维度参数已并入 argument.txt，
+    # 不再单独 load admin.txt）
+    if getattr(args, "deadlock_preview", False):
+        Config.ENABLE_DEADLOCK_PREVIEW = True
+        logger.info("1c 防死锁前瞻预演: ON")
+    if getattr(args, "mrv_order", False):
+        Config.ENABLE_MRV_ORDER = True
+        logger.info("路线3 MRV 顺序约束: ON")
 
     device = torch.device("cpu")
     agent = DQNAgent(

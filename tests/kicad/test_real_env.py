@@ -38,29 +38,33 @@ class TestRealEnv:
         assert real_env.current_step == 0, "current_step should be 0 after reset"
 
     def test_step_0_action_space(self, real_env):
-        """step 0 的动作空间：N_movable 个候选元件。"""
+        """step 0 的动作空间：N_movable 个候选，mask 固定 MAX_MOVABLE 长度（Dict obs）。"""
+        from env.pcb_layout_env import Config
+
         obs = real_env._get_obs_with_pending(0)
         mask = real_env._build_mask_for_step(0)
         assert mask.sum() == real_env.N_movable, (
             f"step 0 mask should have {real_env.N_movable} valid actions, got {mask.sum()}"
         )
-        assert mask.shape[0] == real_env.N_movable
-        obs_dim = real_env.N_movable * 8 + real_env.N_movable + 4
-        assert obs.shape[0] == obs_dim
+        assert mask.shape[0] == Config.MAX_MOVABLE
+        assert obs["component_slots"].shape == (Config.MAX_MOVABLE, 8)
+        assert obs["global_features"].shape == (8,)
 
     def test_step_valid_action_does_not_crash(self, real_env):
         """执行一个有效 step 0 动作不应崩溃。
 
         只验证不崩溃，不验证 reward 值（随机权重下 reward 无意义）。
         """
+        from env.pcb_layout_env import Config
+
         mask = real_env._build_mask_for_step(0)
         # 选择第一个可用元件
         valid_idx = int(mask.nonzero()[0][0])
         # step 0 action: (comp_idx, x1=0, y1=0, x2=0, y2=0, rot=0, lay=0)
         action = (valid_idx, 0, 0, 0, 0, 0, 0)
         obs_next, reward, terminated, truncated, info = real_env.step(action)
-        obs_dim = real_env.N_movable * 8 + real_env.N_movable + 4
-        assert obs_next.shape[0] == obs_dim
+        assert obs_next["component_slots"].shape == (Config.MAX_MOVABLE, 8)
+        assert obs_next["global_features"].shape == (8,)
         assert isinstance(reward, (int, float))
 
     def test_reset_resets_after_step(self, real_env):

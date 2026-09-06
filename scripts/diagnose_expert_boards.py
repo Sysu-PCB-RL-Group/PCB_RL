@@ -86,7 +86,7 @@ def pairwise_hard_pairs(env):
     for a in range(len(placed)):
         for b in range(a + 1, len(placed)):
             ca, cb = placed[a], placed[b]
-            if not PCBUtils.layers_conflict(ca.layer, cb.layer, Config.ENABLE_DUAL_SIDED):
+            if ca.layer != cb.layer:
                 continue
             thr = Config.spacing_threshold_for(ca.package_type, cb.package_type)
             hard, _ = PCBUtils.bbox_overlap_penalty(ca.bbox, cb.bbox, thr)
@@ -146,14 +146,15 @@ def diagnose_board(env, chunks, pcb_short):
         if comp.id in env.placed_list:
             env.placed_list.remove(comp.id)
         cell = Config.CELL_SIZE
-        tw, th = comp.dims_at_rotation(rot)
+        tw, th = comp.footprint_w, comp.footprint_h  # 与合并后 expert/env 同口径（footprint 基准）
         x1 = env.valid_area[0] + gx1 * cell
         y1 = env.valid_area[1] + gy1 * cell
         comp.bbox = (x1, y1, x1 + tw, y1 + th)
         comp.rotation = rot
         comp.layer = layer
         hard, soft, oob, keepout = env._detect_collisions(comp)
-        has_viol = hard > 0.0 or soft > 0.0 or oob > 0.0 or keepout
+        # S3=off：软间距不构成违规（与 env.step / expert _compute_expert_reward 同口径）
+        has_viol = hard > 0.0 or oob > 0.0 or keepout
 
         # 权威 reward（与生成 quality_scale=1.0 一致）
         expert_reward = env._calculate_reward(
@@ -167,7 +168,7 @@ def diagnose_board(env, chunks, pcb_short):
         th = Config.W_OVERLAP_HARD * hard
         ts = Config.W_OVERLAP_SOFT * soft
         to = env.W_OUT_OF_BOUNDS_CURRENT * oob
-        tf = Config.W_VIOLATION_FLAT if has_viol else 0.0
+        tf = 0.0  # S3=off：方案B 的 flat 已废除
 
         rewards.append(expert_reward)
         hard_area += hard
@@ -244,7 +245,7 @@ def crosscheck_source(env, pcb_short):
             for b in range(a + 1, len(boxes)):
                 ba, la, _ = boxes[a]
                 bb, lb, _ = boxes[b]
-                if not PCBUtils.layers_conflict(la, lb, Config.ENABLE_DUAL_SIDED):
+                if la != lb:
                     continue
                 dx = min(ba[2], bb[2]) - max(ba[0], bb[0])
                 dy = min(ba[3], bb[3]) - max(ba[1], bb[1])
@@ -285,8 +286,7 @@ def main():
     print(f"Found {len(pcb_files)} boards under {DATA_DIR}")
     print(f"NORMALIZE_OBS={Config.NORMALIZE_OBS} CELL_SIZE={Config.CELL_SIZE} "
           f"W_OVERLAP_HARD={Config.W_OVERLAP_HARD} W_OVERLAP_SOFT={Config.W_OVERLAP_SOFT} "
-          f"W_OUT_OF_BOUNDS_INITIAL={Config.W_OUT_OF_BOUNDS_INITIAL} "
-          f"W_VIOLATION_FLAT={Config.W_VIOLATION_FLAT}\n")
+          f"W_OUT_OF_BOUNDS_INITIAL={Config.W_OUT_OF_BOUNDS_INITIAL}\n")
 
     for pcb_path in pcb_files:
         pcb_name = os.path.basename(pcb_path)

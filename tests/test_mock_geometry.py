@@ -155,23 +155,30 @@ def _env_with_r1():
     return env, idx
 
 
-def test_env_step_exact_bbox_with_rotation_swap():
-    """step 用 dims_at_rotation 精确重建 bbox，90° 时宽高交换。"""
+def test_env_step_bbox_grid_derived():
+    """合并采纳 feat env：step 用 action 网格坐标直接落 bbox（footprint 基准，不做旋转交换）。"""
     env, idx = _env_with_r1()
+    r1 = env.movable_list[idx]
     gx1, gy1 = 10, 20
-    x1 = env.valid_area[0] + gx1 * Config.CELL_SIZE   # 1 + 2.0 = 3.0
-    y1 = env.valid_area[1] + gy1 * Config.CELL_SIZE   # 1 + 4.0 = 5.0
-    grid_w = math.ceil(1.5 / Config.CELL_SIZE)        # 8
-    grid_h = math.ceil(3.0 / Config.CELL_SIZE)        # 15
+    x1 = env.valid_area[0] + gx1 * Config.CELL_SIZE
+    y1 = env.valid_area[1] + gy1 * Config.CELL_SIZE
+    # 网格格数按 footprint 基准取整（rot=1 也不交换）
+    grid_w = max(1, math.ceil(r1.footprint_w / Config.CELL_SIZE))
+    grid_h = max(1, math.ceil(r1.footprint_h / Config.CELL_SIZE))
     _, reward, _, _, info = env.step((idx, gx1, gy1, gx1 + grid_w, gy1 + grid_h, 1, 0))
     assert info["placed_count"] > 0
     comp = env.movable_list[idx]
-    assert comp.bbox == (x1, y1, x1 + 1.5, y1 + 3.0)   # 精确尺寸，非网格
+    # bbox = grid 坐标外扩（宽高 = 网格格数×CELL），rotation 记录但宽高不交换
+    assert comp.bbox == (
+        x1, y1,
+        env.valid_area[0] + (gx1 + grid_w) * Config.CELL_SIZE,
+        env.valid_area[1] + (gy1 + grid_h) * Config.CELL_SIZE,
+    )
     assert comp.rotation == 1
 
 
-def test_env_step_bbox_not_shrunk_by_int_grid():
-    """即使 action 传 int() 缩小的网格(19)，bbox 仍用精确 3.95mm 宽度。"""
+def test_env_step_bbox_follows_grid_int_dims():
+    """合并采纳 feat env：bbox 由 action 网格格数决定（int 网格；3.95→19 格=3.8mm）。"""
     env, idx = _env_with_r1()
     r1 = env.movable_list[idx]
     r1.footprint_w, r1.footprint_h = 3.95, 2.9
@@ -183,17 +190,21 @@ def test_env_step_bbox_not_shrunk_by_int_grid():
     _, _, _, _, info = env.step((idx, gx1, gy1, gx1 + 19, gy1 + 14, 0, 0))
     assert info["placed_count"] > 0
     comp = env.movable_list[idx]
-    assert comp.bbox == (x1, y1, x1 + 3.95, y1 + 2.9)
+    assert comp.bbox == (
+        x1, y1,
+        env.valid_area[0] + (gx1 + 19) * Config.CELL_SIZE,
+        env.valid_area[1] + (gy1 + 14) * Config.CELL_SIZE,
+    )
 
 
 def test_env_step_rejects_grid_size_mismatch():
-    """网格尺寸与目标旋转真实尺寸差超过 CELL_SIZE → invalid。"""
+    """网格尺寸与 footprint 基准差超过 CELL_SIZE → invalid。"""
     env, idx = _env_with_r1()
     r1 = env.movable_list[idx]
     r1.footprint_w, r1.footprint_h = 3.95, 2.9
     r1.source_bbox = (0, 0, 3.95, 2.9)
-    # rot=1 → dims (2.9, 3.95)；错传 rot=0 的网格 (20,15) → placed_w=4.0 vs 2.9 差 1.1
-    _, reward, _, _, info = env.step((idx, 10, 20, 10 + 20, 20 + 15, 1, 0))
+    # 错传远小于 footprint 的网格 (2格×2格=0.4mm) → placed 差 > 容差 → invalid
+    _, reward, _, _, info = env.step((idx, 10, 20, 10 + 2, 20 + 2, 1, 0))
     assert reward == 0.0
     assert "invalid_action" in info   # _invalid_action 只带 reason，无 placed_count
 
@@ -206,28 +217,28 @@ def _set_pending(env, idx, rot):
         env._update_pending(a, step_id=step_id)
 
 
-def test_assemble_action_ceil_grid():
-    """_assemble_action 网格占用 ceil 取整（3.95→20，非 int 19）。"""
+def test_assemble_action_int_grid():
+    """_assemble_action 网格占用 int 取整（3.95→19），footprint 基准。"""
     env, idx = _env_with_r1()
     r1 = env.movable_list[idx]
     r1.footprint_w, r1.footprint_h = 3.95, 2.9
     r1.source_bbox = (0, 0, 3.95, 2.9)
     _set_pending(env, idx, rot=0)
     action = env._assemble_action()
-    assert action[3] - action[1] == math.ceil(3.95 / Config.CELL_SIZE)   # 20
-    assert action[4] - action[2] == math.ceil(2.9 / Config.CELL_SIZE)    # 15
+    assert action[3] - action[1] == max(1, int(3.95 / Config.CELL_SIZE))   # 19
+    assert action[4] - action[2] == max(1, int(2.9 / Config.CELL_SIZE))    # 14
 
 
-def test_assemble_action_rotation_swap_grid():
-    """_assemble_action 按目标旋转交换宽高后再 ceil。"""
+def test_assemble_action_rotation_no_swap_grid():
+    """_assemble_action 不做旋转宽高交换（合并采纳 feat env）。"""
     env, idx = _env_with_r1()
     r1 = env.movable_list[idx]
     r1.footprint_w, r1.footprint_h = 3.95, 2.9
     r1.source_bbox = (0, 0, 3.95, 2.9)
     _set_pending(env, idx, rot=1)
-    action = env._assemble_action()   # rot=1 → dims (2.9, 3.95)
-    assert action[3] - action[1] == math.ceil(2.9 / Config.CELL_SIZE)    # 15
-    assert action[4] - action[2] == math.ceil(3.95 / Config.CELL_SIZE)   # 20
+    action = env._assemble_action()   # rot=1 也不交换（footprint 基准）
+    assert action[3] - action[1] == max(1, int(3.95 / Config.CELL_SIZE))   # 19
+    assert action[4] - action[2] == max(1, int(2.9 / Config.CELL_SIZE))    # 14
 
 
 def test_clamp_action_to_board_uses_ceil_and_rotation():

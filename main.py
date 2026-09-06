@@ -47,6 +47,10 @@ def get_config():
         "--with_expert", action="store_true",
         help="启用专家轨迹注入（BC 预训练 + ExpertReplayBuffer）；不指定则为纯 RL baseline",
     )
+    parser.add_argument(
+        "--exclude", type=str, default=None,
+        help="从训练中排除的板子名子串（如 'Button'），可多个用英文逗号分隔",
+    )
 
     # === 环境 & 设备 ===
     parser.add_argument(
@@ -59,6 +63,10 @@ def get_config():
     # === 保存 ===
     parser.add_argument("--save_dir", type=str, default="./result", help="模型保存目录")
     parser.add_argument("--task_name", type=str, default="pcb_layout", help="任务名称")
+    parser.add_argument(
+        "--mrv_order", action="store_true",
+        help="路线3：开启 MRV 顺序约束（step0 只放行剩余合法落子最少的元件，需重训）",
+    )
 
     args = parser.parse_args()
 
