@@ -33,6 +33,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
+# 跨板专家缓存随机采样固定种子：保证采样可复现，且不污染全局 np.random 状态
+EXPERT_SAMPLE_SEED = 20260905
+
 
 class Runner:
     """训练循环控制器：自回归 5 步 DQN 训练"""
@@ -510,12 +513,15 @@ class Runner:
     # ==================== 专家轨迹生成/加载 ====================
 
     def _generate_or_load_expert_transitions(self) -> List[Tuple]:
-        """生成或从磁盘加载所有板子的专家 transition。
+        """生成或从磁盘加载所有板子的专家 transition（跨板总量守恒分配）。
 
-        优先从磁盘加载已缓存的专家数据；如果不存在则实时生成。
+        专家轨迹总数 = EXPERT_TOTAL_TRANSITIONS（全局总目标 = 专家常驻区容量 70000）；
+        按版数整除平分到每块板：per_board = 70000 // N（前 rem 块各 +1）。
+        最终 all_transitions 长度 == 总目标，与 ExpertReplayBuffer 常驻容量精确对接，
+        不再发生"每板 70000 → N 板灌入 N×70000 被随机截留"的示范稀释。
 
         Returns:
-            全部专家 transition 的列表
+            全部专家 transition 的列表（长度 == total_transitions）
         """
         # 基线组（use_expert=False）不接触专家数据，直接短路返回
         if not self.use_expert:
@@ -523,7 +529,7 @@ class Runner:
             return []
 
         # 读取专家注入超参数
-        total_transitions = getattr(Config, "EXPERT_TOTAL_TRANSITIONS", 20000)
+        total_transitions = getattr(Config, "EXPERT_TOTAL_TRANSITIONS", 20000)  # 全局总目标
         max_trajectories = getattr(Config, "EXPERT_MAX_TRAJECTORIES", 5000)
         epsilon_decompose = getattr(Config, "EXPERT_EPSILON_DECOMPOSE", 0.5)
         pos_noise_prob = getattr(Config, "EXPERT_POS_NOISE_PROB", 0.2)
@@ -536,9 +542,17 @@ class Runner:
         self.expert_transitions_dir = expert_dir
         os.makedirs(self.expert_transitions_dir, exist_ok=True)
 
+        # 跨板总量守恒分配：全局总目标 ÷ 版数，前 rem 块各多 1 条，保证 sum(per_board) == total
+        n_boards = len(self.pcb_pool)
+        if n_boards == 0:
+            logger.warning("pcb_pool 为空，跳过专家轨迹生成/加载")
+            return []
+        base, rem = divmod(total_transitions, n_boards)
+
         all_transitions = []
 
-        for pcb_name, _ in self.pcb_pool:
+        for i, (pcb_name, _) in enumerate(self.pcb_pool):
+            per_board = base + (1 if i < rem else 0)  # 每块板的目标条数
             pcb_short = pcb_name.replace(".kicad_pcb", "")
             filepath = os.path.join(self.expert_transitions_dir, f"{pcb_short}_expert.json")
 
@@ -546,25 +560,33 @@ class Runner:
                 # 从磁盘加载已缓存的专家数据
                 from env.expert_trajectory import ExpertTrajectoryGenerator
                 transitions = ExpertTrajectoryGenerator.load_transitions(filepath)
-                # top-up：缓存条数不足目标则重生成并覆盖，保证常驻区填满、组成≈7:3
-                if len(transitions) < total_transitions:
+                if len(transitions) < per_board:
+                    # top-up：缓存条数不足本板目标则重生成并覆盖，保证常驻区填满
                     logger.info(
-                        f"[{pcb_short}] cache has {len(transitions)} < target "
-                        f"{total_transitions}, regenerating expert transitions"
+                        f"[{pcb_short}] cache has {len(transitions)} < per_board "
+                        f"{per_board} (n_boards={n_boards}, total={total_transitions}), "
+                        f"regenerating expert transitions"
                     )
                     transitions, _ = generate_and_save_expert_transitions(
                         env=self.envs[pcb_name],
                         pcb_name=pcb_name,
                         output_dir=self.expert_transitions_dir,
-                        total_transitions=total_transitions,
+                        total_transitions=per_board,
                         max_trajectories=max_trajectories,
                         epsilon_decompose=epsilon_decompose,
                         pos_noise_prob=pos_noise_prob,
                         rot_noise_prob=rot_noise_prob,
                     )
                 else:
+                    # 缓存充足：随机采样 per_board 条（固定 seed），避免旧缓存每板 70020
+                    # 全进 all_transitions 又超常驻容量；零偏差对接 load_expert_transitions 随机抽语义
+                    n_cached = len(transitions)
+                    rng = np.random.default_rng(EXPERT_SAMPLE_SEED)
+                    idx = rng.choice(n_cached, size=per_board, replace=False)
+                    transitions = [transitions[j] for j in idx]
                     logger.info(
-                        f"[{pcb_short}] Loaded {len(transitions)} expert transitions from cache"
+                        f"[{pcb_short}] Loaded {len(transitions)} expert transitions from cache "
+                        f"(sampled from {n_cached} cached, per_board={per_board})"
                     )
             else:
                 # 实时生成
@@ -573,7 +595,7 @@ class Runner:
                     env=env,
                     pcb_name=pcb_name,
                     output_dir=self.expert_transitions_dir,
-                    total_transitions=total_transitions,
+                    total_transitions=per_board,
                     max_trajectories=max_trajectories,
                     epsilon_decompose=epsilon_decompose,
                     pos_noise_prob=pos_noise_prob,
@@ -582,6 +604,10 @@ class Runner:
 
             all_transitions.extend(transitions)
 
+        logger.info(
+            f"Expert transitions total={len(all_transitions)} "
+            f"(target={total_transitions}, n_boards={n_boards}, per_board={base}+{rem})"
+        )
         return all_transitions
 
     # ==================== Phase 1: BC 预训练 ====================

@@ -23,21 +23,26 @@ class PCBUtils:
         a: Tuple[float, float, float, float],
         b: Tuple[float, float, float, float],
         spacing_threshold: float,
+        soft_ref_depth: float = 1.0,
     ) -> Tuple[float, float]:
         """计算两个 AABB 之间的碰撞惩罚。
 
-        同时返回硬重叠面积和软间距惩罚。
+        同时返回硬重叠面积 (mm²) 和软间距惩罚 (mm²)。
+        两者同为 mm² 量纲，可直接由对应权重比较标定。
 
         Args:
             a: (x1, y1, x2, y2) AABB 包围盒
             b: (x1, y1, x2, y2) AABB 包围盒
             spacing_threshold: 分类间距阈值 (mm)，由调用方从两个元件的
                                package_type 查表后取 max 传入
+            soft_ref_depth: 软间距等效穿透深度 (mm)，把"间距不足"折算为
+                            该深度的重叠面积；默认 1.0
 
         Returns:
             (hard_overlap, soft_spacing):
             hard_overlap: 物理交叉面积 (mm²)，>0 表示硬重叠
-            soft_spacing: 间隙 < spacing_threshold 时的连续惩罚值，0 表示不惩罚
+            soft_spacing: 间隙 < spacing_threshold 时的连续惩罚值 (mm²)，
+                          0 表示不惩罚；gap->0 时趋近 edge × soft_ref_depth
         """
         dx = min(a[2], b[2]) - max(a[0], b[0])
         dy = min(a[3], b[3]) - max(a[1], b[1])
@@ -58,8 +63,10 @@ class PCBUtils:
         if gap >= spacing_threshold:
             return (0.0, 0.0)
 
-        # 软间距连续惩罚：(threshold - gap)² × edge
-        return (0.0, (spacing_threshold - gap) ** 2 * edge)
+        # 软间距连续惩罚（归一化线性，mm² 量纲，与硬重叠统一）：
+        # ((threshold - gap) / threshold) × edge × soft_ref_depth
+        # 阈值缩放不再塌缩（只取决于相对缺口）；gap->0 时趋近 edge × soft_ref_depth
+        return (0.0, (spacing_threshold - gap) / spacing_threshold * edge * soft_ref_depth)
 
     # ========== 层冲突语义（双面贴装） ==========
 

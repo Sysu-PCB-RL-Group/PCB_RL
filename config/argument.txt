@@ -11,6 +11,7 @@ GRID_H             = 100        # 统一离散化网格高
 # ========== Reward 权重（负值为惩罚，正值为奖励） ==========
 W_OVERLAP_HARD        = 20.0      # 硬重叠惩罚（元件物理碰撞，必须避免）
 W_OVERLAP_SOFT        = 10.0      # 软间距惩罚（元件距离太近但不重叠）
+SOFT_REF_DEPTH        = 1.0       # 软间距等效穿透深度(mm)：间距不足折算为该深度的重叠面积（方案B：gap<threshold 即判违规）
 W_OUT_OF_BOUNDS_INITIAL= 2.0      # 出板框初始惩罚（curriculum 前期宽松）
 W_OUT_OF_BOUNDS_FINAL  = 20.0     # 出板框最终惩罚（curriculum 后期>500ep 收紧至此值）
 W_NET_AGGREGATION     = 10.0      # 网络聚集奖励（同一网络元件越近越好）
@@ -18,6 +19,7 @@ W_CONGESTION          = 5.0       # 拥塞均衡奖励（引导元件分布均�
 W_DECOUPLING           = 10.0     # 去耦电容配对奖励（去耦电容靠近对应 IC）
 W_LARGE_COMP           = 5.0      # 大型元件优先奖励（大元件早放有更多空位可选）
 W_COMPLETION           = 100.0    # 完成奖励（每成功放置一颗元件的基础分）
+W_VIOLATION_FLAT      = 5.0       # 固定失败成本：每次违规放置额外扣除，与面积无关（抬高试错底价）
 
 # ========== Reward Shaping：品质项时序 ==========
 QUALITY_START_EP      = 3000      # 品质项开始介入的 episode（约束学稳后引入品质引导）
@@ -29,7 +31,7 @@ EPSILON_START       = 0.6        # ε-greedy 初始探索率（BC 预训练后�
 EPSILON_MIN         = 0.1        # ε-greedy 最小探索率（指数衰减下界）
 EPSILON_DECAY_EPISODES = 10000  # ε 衰减最短收敛区间（下限）：总 epi ≤ 此值时按此值收敛，> 此值时按实际总 epi 收敛
 MAX_STEPS           = 2000       # 单 episode 最大环境步数（233 元件×5 子步≈1165，留余量）
-EARLY_STOP_THRESHOLD  = -150.0   # 累计 reward 低于此值提前终止 episode
+EARLY_STOP_THRESHOLD  = -200.0   # 累计 reward 低于此值提前终止 episode（方案B：补偿 flat 成本压缩的预算，只改失败单价不改失败次数）
 CURRICULUM_START_EP = 0          # curriculum 起始 episode（出界惩罚从轻到重）
 CURRICULUM_END_EP   = 500        # curriculum 截止 episode（500ep 后出界惩罚=最终值）
 TOTAL_EPISODES      = 10000      # 总训练 episode 数

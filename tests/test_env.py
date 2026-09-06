@@ -241,9 +241,12 @@ def test_quality_reward_zero_on_violation():
     assert bd["large_comp"] == 0.0
     # 完成奖励也必须为 0（失败不放完成奖励）
     assert "completion_partial" not in bd or bd["completion_partial"] == 0.0
-    # reward 只含硬重叠惩罚：-W_OVERLAP_HARD * hard
-    assert reward == -Config.W_OVERLAP_HARD * hard
+    # reward 只含硬重叠惩罚 + 固定失败成本：-W_OVERLAP_HARD * hard - W_VIOLATION_FLAT
+    expected = -Config.W_OVERLAP_HARD * hard - Config.W_VIOLATION_FLAT
+    assert abs(reward - expected) < 1e-6, f"reward={reward}, expected={expected}"
     assert reward <= 0.0
+    # breakdown 记录 flat 成本
+    assert bd["violation_flat"] == -Config.W_VIOLATION_FLAT
 
 
 def test_quality_reward_nonzero_on_valid():
@@ -261,6 +264,50 @@ def test_quality_reward_nonzero_on_valid():
     assert bd["completion_partial"] > 0.0
     # 总 reward 为正（完成奖励 + 品质项 - 零惩罚）
     assert reward > 0.0
+
+
+def test_violation_flat_on_hard_overlap():
+    """has_violations=True 时，_calculate_reward 额外扣 W_VIOLATION_FLAT 并写入 breakdown。"""
+    env = create_patched_env()
+    env.reset()
+    comp = env.movable_list[0]
+    hard, soft, oob, keepout = 100.0, 0.0, 0.0, False
+    reward = env._calculate_reward(comp, hard, soft, oob, True, quality_scale=1.0)
+    bd = env._last_reward_breakdown
+    assert bd["violation_flat"] == -Config.W_VIOLATION_FLAT
+    assert reward <= -Config.W_VIOLATION_FLAT
+
+
+def test_no_flat_on_valid():
+    """has_violations=False 时，不扣 W_VIOLATION_FLAT（breakdown 无该字段或为零）。"""
+    env = create_patched_env()
+    env.reset()
+    comp = env.movable_list[0]
+    hard, soft, oob, keepout = 0.0, 0.0, 0.0, False
+    reward = env._calculate_reward(comp, hard, soft, oob, False, quality_scale=1.0)
+    bd = env._last_reward_breakdown
+    assert bd.get("violation_flat", 0.0) == 0.0
+    assert reward > 0.0
+
+
+def test_soft_spacing_violation_net_negative():
+    """方案B核心回归：间距不足(gap<threshold)算违规 -> 扣 flat、无完成奖励、净负。
+
+    直接构造 has_violations=True 且 soft>0 的场景（端到端软间距判定已由
+    scripts/calibrate_reward.py 用真实开关小板几何验证：合规布局软间距全为 0）。
+    """
+    env = create_patched_env()
+    env.reset()
+    comp = env.movable_list[0]
+    # 纯软间距违规：硬重叠=0，软间距>0，无出界/keepout
+    hard, soft, oob, keepout = 0.0, 5.0, 0.0, False
+    reward = env._calculate_reward(comp, hard, soft, oob, True, quality_scale=1.0)
+    bd = env._last_reward_breakdown
+    # 违规：扣 flat，且无完成奖励
+    assert bd["violation_flat"] == -Config.W_VIOLATION_FLAT
+    assert "completion_partial" not in bd or bd["completion_partial"] == 0.0
+    # 净收益为负（模型应规避该动作）
+    assert reward < 0.0
 
 
 # ==================== assemble_action ====================

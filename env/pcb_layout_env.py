@@ -30,6 +30,8 @@ class Config:
     W_DECOUPLING: float = 10.0
     W_LARGE_COMP: float = 5.0
     W_COMPLETION: float = 200.0
+    SOFT_REF_DEPTH: float = 1.0      # 软间距等效穿透深度(mm)：间距不足折算为该深度的重叠面积
+    W_VIOLATION_FLAT: float = 5.0    # 固定失败成本：每次违规放置额外扣除，与面积无关
 
     # Reward Shaping：品质项时序控制
     QUALITY_START_EP: int = 10000
@@ -373,7 +375,15 @@ class PCBLayoutEnv(gym.Env):
             self._detect_collisions(component)
 
         # 7. 计算 reward
-        has_violations = (total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout)
+        # 方案B：软间距不足（gap<threshold，即 total_soft_spacing>0）也判为违规，
+        # 使"贴紧"动作不发任何奖励、只扣分（净收益为负），模型才会主动规避。
+        # 完美布局最紧间隙 0.244mm > 阈值 0.2 → soft=0，不触发，零惩罚守住。
+        has_violations = (
+            total_hard_overlap > 0.0
+            or total_soft_spacing > 0.0
+            or total_out_of_bounds > 0.0
+            or in_keepout
+        )
         reward = self._calculate_reward(
             component, total_hard_overlap, total_soft_spacing,
             total_out_of_bounds, has_violations
@@ -640,7 +650,7 @@ class PCBLayoutEnv(gym.Env):
                 component.package_type, other.package_type
             )
             hard, soft = PCBUtils.bbox_overlap_penalty(
-                component.bbox, other.bbox, threshold
+                component.bbox, other.bbox, threshold, Config.SOFT_REF_DEPTH
             )
             total_hard_overlap += hard
             total_soft_spacing += soft
@@ -703,6 +713,13 @@ class PCBLayoutEnv(gym.Env):
         penalty_oob = self.W_OUT_OF_BOUNDS_CURRENT * total_out_of_bounds
         reward -= penalty_oob
         breakdown["out_of_bounds"] = -penalty_oob
+
+        # 固定失败成本：每次违规放置额外扣除，与面积无关（抬高试错底价）
+        # 仅在 has_violations 时生效（贴紧/重叠/出界/keepout 均算违规）
+        if has_violations:
+            penalty_flat = Config.W_VIOLATION_FLAT
+            reward -= penalty_flat
+            breakdown["violation_flat"] = -penalty_flat
 
         # ========== 品质奖励（quality_scale 升温控制） ==========
         # 品质项仅在合法放置（无违规）时发放：失败 step 只扣 hard/soft/oob 惩罚，

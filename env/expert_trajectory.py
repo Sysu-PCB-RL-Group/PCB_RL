@@ -12,8 +12,10 @@
 import copy
 import json
 import logging
+import math
 import os
 import random
+from collections import deque
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -74,6 +76,7 @@ class ExpertTrajectoryGenerator:
         self.epsilon_decompose = epsilon_decompose
         self.pos_noise_prob = pos_noise_prob
         self.rot_noise_prob = rot_noise_prob
+        self._placed_soft_steps = 0  # 方案Y安全阀：最终放置 soft>0 的步数统计
 
     # ==================== 核心：反向拆解 ====================
 
@@ -210,7 +213,7 @@ class ExpertTrajectoryGenerator:
 
         # 合法性检查：越界或硬重叠则回退到原始状态
         mutated_bbox = tuple(bbox)
-        if not self._is_legal_placement(mutated_bbox, comp_id, snapshot, env.valid_area, env=env):
+        if not self._is_legal_placement(mutated_bbox, comp_id, snapshot, env.valid_area, env=env, check_soft=True):
             return {
                 "bbox": tuple(comp_state["bbox"]),
                 "rotation": comp_state["rotation"],
@@ -230,6 +233,7 @@ class ExpertTrajectoryGenerator:
         snapshot: dict,
         valid_area: Tuple[float, float, float, float],
         env=None,
+        check_soft: bool = False,
     ) -> bool:
         """检查 bbox 是否合法：不越界、且与快照中其它全部元件无硬重叠。
 
@@ -282,8 +286,10 @@ class ExpertTrajectoryGenerator:
             other_pkg = other_state.get("package_type", 0)
             threshold = Config.spacing_threshold_for(self_pkg, other_pkg)
             hard, soft = PCBUtils.bbox_overlap_penalty(bbox, other_bbox, threshold)
-            # 只拦截硬重叠（has_violations 依据）；软间距不在此拦截
-            if hard > 0.0:
+            # 硬重叠始终拦截；软间距仅当 check_soft=True 时拦截（用于变异回退，
+            # 保证专家轨迹不含变异产生的紧贴）。量化复查不传 check_soft，避免
+            # 源完美布局量化后固有软间距被误拦导致 base 回退失败（无法放置）。
+            if hard > 0.0 or (check_soft and soft > 0.0):
                 return False
         return True
 
@@ -379,14 +385,38 @@ class ExpertTrajectoryGenerator:
             # 阈值 0.2 边界翻转违规判定，产生 reward≈1~4 的坏专家样本。
             gx1, gy1, quantized_bbox = self._quantize_bbox_to_grid(env, target_bbox)
 
-            # 量化后复查合法性：量化可能使间距 < 软间距阈值（连续坐标下恰好合法、
-            # 量化后翻转），此时回退到无变异基准位置的量化坐标，保证专家轨迹合法。
+            # 用最终目标 layer 更新快照，使 _is_legal_placement 碰撞判定与最终
+            # 放置一致（双面板异层不计碰撞，须用目标 layer 而非源 layer）。
+            actual_snapshot[comp_id]["layer"] = target_layer
+
+            # 量化后复查合法性：量化可能使间距 < 软间距阈值、推出界、或与已放置
+            # 同层元件硬重叠（含源 sub-grid 量化并入同格）。非法则回退无变异基准
+            # 并在 grid 内搜最近合法位置（保持 rot/layer），无解则丢弃该 chunk。
             if not self._is_legal_placement(
                 quantized_bbox, comp_id, actual_snapshot, env.valid_area, env=env
             ):
-                gx1, gy1, quantized_bbox = self._quantize_bbox_to_grid(env, base_bbox)
+                found = self._find_legal_placement(
+                    env, comp_id, actual_snapshot, base_bbox, comp_target["layer"]
+                )
+                if found is None:
+                    # 全盘无解：丢弃该 chunk，杜绝非法样本污染专家缓存
+                    logger.warning(
+                        f"[expert] 元件 {comp_id} 量化后无合法位置，丢弃该 chunk"
+                    )
+                    continue
+                gx1, gy1, quantized_bbox = found
                 target_rotation = base_rotation
                 target_layer = comp_target["layer"]
+                actual_snapshot[comp_id]["layer"] = target_layer
+
+            # 生成期护栏：确保入库样本零违规（未来代码回归不会静默重新污染 buffer）
+            if not self._is_legal_placement(
+                quantized_bbox, comp_id, actual_snapshot, env.valid_area, env=env
+            ):
+                logger.error(
+                    f"[expert] 护栏触发：元件 {comp_id} 量化后仍非法，丢弃该 chunk"
+                )
+                continue
 
             # 全程统一使用量化坐标
             target_bbox = quantized_bbox
@@ -566,6 +596,9 @@ class ExpertTrajectoryGenerator:
         专家轨迹代表理想最终布局，因此 quality_scale 强制为 1.0（品质项完全
         生效），复用 env._detect_collisions + env._calculate_reward，保证专家
         注入的 reward 标签与训练 reward 标准同步（含品质项，而非仅完成奖励）。
+        注：quality_scale 固定 1.0 属"理想示范满分品质"的设计决策，与训练侧
+        warmup 期 quality_scale 升温（env._get_quality_scale）是"示范 vs 学习"
+        的区分而非口径不一致——两者最终标准一致（warmup 后训练侧也回到 1.0）。
 
         Args:
             env: PCBLayoutEnv 实例
@@ -593,8 +626,19 @@ class ExpertTrajectoryGenerator:
         try:
             total_hard_overlap, total_soft_spacing, total_out_of_bounds, in_keepout = \
                 env._detect_collisions(comp)
+            # 方案Y安全阀：变异紧贴已被 _is_legal_placement(check_soft=True) 回退，
+            # 此处 soft>0 仅来自源完美布局量化后的固有软间距，应极少。
+            if total_soft_spacing > 0.0:
+                self._placed_soft_steps += 1
+            # 与训练侧 env.step (L381-386) 同口径：紧贴(soft>0)也计入违规，该步扣
+            # W_VIOLATION_FLAT 且不发品质项。当前零软间距数据重生成后 has_violations
+            # 仍为 False -> reward 数值不变；仅消除结构性不对称，并让未来含紧贴的样本
+            # 自动对齐（2026-09-05 用户决策：推翻方案Y"不把 soft 计入 has_violations"）。
             has_violations = (
-                total_hard_overlap > 0.0 or total_out_of_bounds > 0.0 or in_keepout
+                total_hard_overlap > 0.0
+                or total_soft_spacing > 0.0
+                or total_out_of_bounds > 0.0
+                or in_keepout
             )
             return env._calculate_reward(
                 comp,
@@ -631,6 +675,73 @@ class ExpertTrajectoryGenerator:
         y2 = y1 + cell_size
         return (x1, y1, x2, y2)
 
+    def _find_legal_placement(
+        self,
+        env,
+        comp_id: str,
+        snapshot: dict,
+        bbox: Tuple[float, float, float, float],
+        layer: int,
+    ) -> Optional[Tuple[int, int, Tuple[float, float, float, float]]]:
+        """在 grid 内搜索最近的无硬重叠、不出界的合法量化位置。
+
+        用于量化后 `_is_legal_placement` 失败时的回退修复，覆盖三类根因：
+          - 元件宽高 > CELL 且贴边被推出界（Button 出界 44/50）；
+          - 同层硬重叠（含灯板2 源 sub-grid 量化并入同格的 18/50 硬重叠）。
+        返回 `(gx1, gy1, quantized_bbox)`，保持 layer 不变；全盘无解返回 None
+        （由调用方丢弃该 chunk，不污染专家缓存）。
+
+        注意：调用前必须将 `snapshot[comp_id]["layer"]` 设为最终目标 layer，
+        因 `_is_legal_placement` 读快照中自身 layer 判定碰撞，须与最终放置一致。
+        """
+        va_xmin, va_ymin, va_xmax, va_ymax = env.valid_area
+        cell = Config.CELL_SIZE
+        grid_w = env.grid_width
+        grid_h = env.grid_height
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+
+        def make_bbox(gx, gy):
+            x1 = va_xmin + gx * cell
+            y1 = va_ymin + gy * cell
+            return (x1, y1, x1 + w, y1 + h)
+
+        # 自然吸附位置（带远端点 clamp）
+        gx0 = int(round((bbox[0] - va_xmin) / cell))
+        gy0 = int(round((bbox[1] - va_ymin) / cell))
+        gx0 = max(0, min(gx0, grid_w - 1))
+        gy0 = max(0, min(gy0, grid_h - 1))
+        cb0 = make_bbox(gx0, gy0)
+        if (
+            cb0[2] <= va_xmax
+            and cb0[3] <= va_ymax
+            and self._is_legal_placement(cb0, comp_id, snapshot, env.valid_area, env=env)
+        ):
+            return (gx0, gy0, cb0)
+
+        # BFS：8 邻接在 grid 内扩展，搜最近空闲格（保持 layer 不变）
+        seen = {(gx0, gy0)}
+        dq = deque([(gx0, gy0)])
+        while dq:
+            cx, cy = dq.popleft()
+            for dx, dy in (
+                (1, 0), (-1, 0), (0, 1), (0, -1),
+                (1, 1), (1, -1), (-1, 1), (-1, -1),
+            ):
+                nx, ny = cx + dx, cy + dy
+                if not (0 <= nx <= grid_w - 1 and 0 <= ny <= grid_h - 1):
+                    continue
+                if (nx, ny) in seen:
+                    continue
+                seen.add((nx, ny))
+                cb = make_bbox(nx, ny)
+                if cb[2] > va_xmax or cb[3] > va_ymax:
+                    continue  # 出界候选直接跳过
+                if self._is_legal_placement(cb, comp_id, snapshot, env.valid_area, env=env):
+                    return (nx, ny, cb)
+                dq.append((nx, ny))
+        return None
+
     def _quantize_bbox_to_grid(
         self,
         env,
@@ -654,18 +765,37 @@ class ExpertTrajectoryGenerator:
             _compute_expert_reward 的坐标重建公式完全一致
         """
         cell_size = Config.CELL_SIZE
-        gx1 = int(round((bbox[0] - env.valid_area[0]) / cell_size))
-        gy1 = int(round((bbox[1] - env.valid_area[1]) / cell_size))
-        # clamp 到网格范围
-        gx1 = max(0, min(gx1, env.grid_width - 1))
-        gy1 = max(0, min(gy1, env.grid_height - 1))
+        va_xmin, va_ymin, va_xmax, va_ymax = env.valid_area
+        grid_w = env.grid_width
+        grid_h = env.grid_height
 
-        x1 = env.valid_area[0] + gx1 * cell_size
-        y1 = env.valid_area[1] + gy1 * cell_size
-        # 只把原点对齐到网格，宽高保持传入 bbox 不变（由调用方用
-        # dims_at_rotation(target_rot) 重建，保证与 reward/next_obs 一致）
+        gx1 = int(round((bbox[0] - va_xmin) / cell_size))
+        gy1 = int(round((bbox[1] - va_ymin) / cell_size))
+        # 原点下限 clamp（上限由远端点 clamp 处理）
+        gx1 = max(0, min(gx1, grid_w - 1))
+        gy1 = max(0, min(gy1, grid_h - 1))
+
+        # 远端点 clamp：保证量化后整框完整落在 grid 内，消除"推出界"。
+        # 旧实现只 clamp 原点 gx1/gy1，当元件宽高 > CELL 且贴边时，x2/y2 会
+        # 越过 va_xmax/va_ymax，使 _is_legal_placement 越界判定失败；且 base
+        # 回退仍复用同一量化器 → 非法样本静默入库（Button 出界 44/50 根因）。
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
+        x1 = va_xmin + gx1 * cell_size
+        y1 = va_ymin + gy1 * cell_size
+        x2 = x1 + w
+        y2 = y1 + h
+        if x2 > va_xmax:
+            gx1 -= int(math.ceil((x2 - va_xmax) / cell_size))
+            gx1 = max(0, gx1)
+        if y2 > va_ymax:
+            gy1 -= int(math.ceil((y2 - va_ymax) / cell_size))
+            gy1 = max(0, gy1)
+
+        x1 = va_xmin + gx1 * cell_size
+        y1 = va_ymin + gy1 * cell_size
+        # 只把原点对齐到网格，宽高保持传入 bbox 不变（由调用方用
+        # dims_at_rotation(target_rot) 重建，保证与 reward/next_obs 一致）
         return (gx1, gy1, (x1, y1, x1 + w, y1 + h))
 
     def _copy_obs(self, obs: dict) -> dict:
@@ -819,10 +949,16 @@ class ExpertTrajectoryGenerator:
             traj_count += 1
 
         buffer_capacity = Config.EXPERT_BUFFER_MULTIPLIER * len(all_transitions)
+        soft_ratio = 100.0 * self._placed_soft_steps / max(len(all_transitions), 1)
         logger.info(
             f"[{pcb_name}] Generated {traj_count} trajectories → "
             f"{len(all_transitions)} expert transitions "
             f"(target={self.total_transitions}, buffer_capacity={buffer_capacity})"
+        )
+        logger.info(
+            f"[{pcb_name}] 方案Y安全阀 最终放置软间距步数: {self._placed_soft_steps} "
+            f"/ {len(all_transitions)} ({soft_ratio:.2f}%) —— 应≈源布局量化固有soft；"
+            f"若异常高(>5%)说明源完美布局量化后间隙偏小，需查 spacing_threshold"
         )
         return all_transitions, all_raw
 

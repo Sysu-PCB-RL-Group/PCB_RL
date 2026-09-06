@@ -107,6 +107,57 @@ def test_soft_spacing_close():
     assert soft > 0.0
 
 
+def test_soft_spacing_monotonic():
+    """间距越小，软间距惩罚越大（方案B归一化线性，gap 增大则 soft 递减）。"""
+    thr = 5.0
+    prev = 1e9  # gap 越小 soft 越大；随 gap 递增 soft 应严格递减
+    for gap in (0.0, 1.0, 2.0, 3.0, 4.0):
+        _, soft = PCBUtils.bbox_overlap_penalty(
+            (0, 0, 10, 10), (10.0 + gap, 0, 20.0 + gap, 10), thr
+        )
+        assert soft < prev, f"gap={gap}: soft={soft} should be < prev {prev} (gap 越小罚越重)"
+        prev = soft
+    # 边界归零：gap >= threshold 时 soft == 0
+    _, soft_edge = PCBUtils.bbox_overlap_penalty(
+        (0, 0, 10, 10), (15.0, 0, 25.0, 10), thr
+    )
+    assert soft_edge == 0.0
+
+
+def test_soft_spacing_threshold_invariant():
+    """归一化后相同相对缺口在不同阈值下惩罚一致（阈值缩放不再塌缩）。
+
+    gap=0.1/thr=0.2（相对缺口 0.5）应与 gap=0.2/thr=0.4（相对缺口 0.5）同罚。
+    """
+    _, soft_a = PCBUtils.bbox_overlap_penalty(
+        (0, 0, 10, 10), (10.1, 0, 20.1, 10), 0.2
+    )
+    _, soft_b = PCBUtils.bbox_overlap_penalty(
+        (0, 0, 10, 10), (10.2, 0, 20.2, 10), 0.4
+    )
+    assert abs(soft_a - soft_b) < 1e-6, f"soft_a={soft_a}, soft_b={soft_b}"
+
+
+def test_soft_spacing_ref_depth_scales():
+    """soft_ref_depth 线性缩放软间距惩罚面积。"""
+    _, soft1 = PCBUtils.bbox_overlap_penalty(
+        (0, 0, 10, 10), (10.0, 0, 20.0, 10), 0.2, soft_ref_depth=1.0
+    )
+    _, soft2 = PCBUtils.bbox_overlap_penalty(
+        (0, 0, 10, 10), (10.0, 0, 20.0, 10), 0.2, soft_ref_depth=2.0
+    )
+    assert abs(soft2 - 2.0 * soft1) < 1e-6, f"soft1={soft1}, soft2={soft2}"
+
+
+def test_soft_spacing_diagonal_zero():
+    """对角分离（无共享边）→ hard=0, soft=0。"""
+    hard, soft = PCBUtils.bbox_overlap_penalty(
+        (0, 0, 10, 10), (20, 20, 30, 30), 0.2
+    )
+    assert hard == 0.0
+    assert soft == 0.0
+
+
 # ==================== C5：网络聚合 ====================
 
 

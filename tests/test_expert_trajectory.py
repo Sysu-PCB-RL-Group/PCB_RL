@@ -634,6 +634,49 @@ def test_raw_trajectory_cache():
     logger.info("test_raw_trajectory_cache: PASSED")
 
 
+# ===================== 测试 10: 专家 has_violations 含软间距（对齐锁） =====================
+
+def test_expert_has_violations_includes_soft():
+    """回归锁：专家 has_violations 必须把软间距(soft>0)计入违规，与训练侧
+    env.step (L381-386) 同口径。
+
+    否则未来某板专家布局含紧贴时，专家/训练侧 reward 标准会分叉（2026-09-05
+    决策：推翻方案Y"不把 soft 计入 has_violations"）。用 mock 直接控制
+    _detect_collisions 返回值，隔离软间距变量。
+    """
+    env = _setup_collision_free_env()
+    generator = ExpertTrajectoryGenerator()
+    # 第一个 movable 元件（U1，已在 _setup_collision_free_env 设好 bbox）
+    comp_idx = 0
+    comp = env.movable_list[comp_idx]
+    cell = Config.CELL_SIZE
+    va = env.valid_area
+    x1, y1, x2, y2 = comp.bbox
+    gx1 = int(round((x1 - va[0]) / cell))
+    gy1 = int(round((y1 - va[1]) / cell))
+    expert_actions = [comp_idx, gx1, gy1, comp.rotation, comp.layer]
+
+    # 基准：无违规（soft=0）
+    with mock.patch.object(env, "_detect_collisions",
+                           return_value=(0.0, 0.0, 0.0, False)):
+        reward_clean = generator._compute_expert_reward(env, comp_idx, expert_actions)
+    # 紧贴：软间距>0，但无硬重叠/出界/keepout
+    with mock.patch.object(env, "_detect_collisions",
+                           return_value=(0.0, 1.5, 0.0, False)):
+        reward_soft = generator._compute_expert_reward(env, comp_idx, expert_actions)
+
+    # 含软间距时必须视为违规（更差），且差额至少含固定失败成本
+    assert reward_soft < reward_clean, \
+        f"Soft spacing must count as violation: clean={reward_clean}, soft={reward_soft}"
+    assert reward_clean - reward_soft >= Config.W_VIOLATION_FLAT - 1e-6, \
+        f"Soft violation should cost >= W_VIOLATION_FLAT({Config.W_VIOLATION_FLAT}): " \
+        f"diff={reward_clean - reward_soft}"
+    logger.info(
+        f"test_expert_has_violations_includes_soft: PASSED "
+        f"(clean={reward_clean:.3f}, soft={reward_soft:.3f})"
+    )
+
+
 # ===================== 运行全部测试 =====================
 
 if __name__ == "__main__":
@@ -649,5 +692,6 @@ if __name__ == "__main__":
     test_bc_pretrain_loss_decrease()
     test_generate_and_save()
     test_raw_trajectory_cache()
+    test_expert_has_violations_includes_soft()
     logger.info("=" * 50)
     logger.info("All expert trajectory tests PASSED!")
