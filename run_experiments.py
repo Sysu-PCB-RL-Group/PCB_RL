@@ -57,7 +57,8 @@ def get_config() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="跨板优化对照实验调度器")
     parser.add_argument(
         "--experiment", type=str, required=True,
-        help="实验类型(可逗号组合, 顺序执行): A=专家有无 / D=reward尺度错配 / E=跨板vs单板, 例如 A,D,E",
+        help="实验类型(可逗号组合, 顺序执行): A=专家有无 / D=reward尺度错配 / E=跨板vs单板 "
+             "/ F=出界惩罚强度 / G=Curriculum升温速度+多板泛化 / H=Early stopping, 例如 A,D,E",
     )
     parser.add_argument(
         "--board", type=str, default=None,
@@ -75,6 +76,14 @@ def get_config() -> argparse.Namespace:
         help="每个 episode 最大步数（None 用 argument.txt 的 MAX_STEPS）",
     )
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--early_stop_patience", type=int, default=0,
+        help="实验 H 用：全局 best 停滞超过 N 个 episode 即提前终止训练（0=不早停，跑满）",
+    )
+    parser.add_argument(
+        "--mrv_order", action="store_true",
+        help="路线3：开启 MRV 顺序约束（step0 只放行剩余合法落子最少的元件，需重训做对照）",
+    )
     return parser.parse_args()
 
 
@@ -95,7 +104,7 @@ def _patch_config(config_path: str, overrides: dict, out_path: str) -> str:
 
     Args:
         config_path: 原始 config 路径
-        overrides: 要覆盖的 {KEY: 值} 字典（写成 int）
+        overrides: 要覆盖的 {KEY: 值} 字典（支持 int/float）
         out_path: 输出临时 config 路径
     """
     lines = []
@@ -105,14 +114,17 @@ def _patch_config(config_path: str, overrides: dict, out_path: str) -> str:
             line = line.rstrip("\n")
             key = line.split("=")[0].strip() if "=" in line else None
             if key and key in overrides:
-                lines.append(f"{key}        = {int(overrides[key])}")
+                v = overrides[key]
+                val_str = str(int(v)) if float(v).is_integer() else str(v)
+                lines.append(f"{key}        = {val_str}")
                 applied.add(key)
             else:
                 lines.append(line)
     # 若原 config 中缺失 override 键，则追加（保证注入一定生效）
     for k, v in overrides.items():
         if k not in applied:
-            lines.append(f"{k}        = {int(v)}")
+            val_str = str(int(v)) if float(v).is_integer() else str(v)
+            lines.append(f"{k}        = {val_str}")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     logger.info(f"临时 config: {out_path} (overrides={overrides})")
@@ -120,7 +132,7 @@ def _patch_config(config_path: str, overrides: dict, out_path: str) -> str:
 
 
 def _build_runner_args(args, use_expert, save_dir, config_path, board,
-                       expert_transitions_dir=""):
+                       expert_transitions_dir="", early_stop_patience=None):
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     return argparse.Namespace(
         config_path=config_path,
@@ -134,17 +146,21 @@ def _build_runner_args(args, use_expert, save_dir, config_path, board,
         use_expert=use_expert,
         explicit_total_episodes=False,
         expert_transitions_dir=expert_transitions_dir,
+        early_stop_patience=early_stop_patience if early_stop_patience is not None
+        else getattr(args, "early_stop_patience", 0),
+        mrv_order=getattr(args, "mrv_order", False),
     )
 
 
 def _run_one(label, args, use_expert, config_path, board, save_dir,
-             expert_transitions_dir=""):
+             expert_transitions_dir="", early_stop_patience=None):
     """运行一组训练，返回 Runner 或 None。"""
     logger.info("=" * 70)
     logger.info(f"==== 开始 {label}（use_expert={use_expert}, board={board or '跨板'}）====")
     logger.info("=" * 70)
     rargs = _build_runner_args(args, use_expert, save_dir, config_path, board,
-                               expert_transitions_dir=expert_transitions_dir)
+                               expert_transitions_dir=expert_transitions_dir,
+                               early_stop_patience=early_stop_patience)
     runner = Runner(rargs)
     try:
         runner.run()
@@ -282,6 +298,223 @@ def _run_experiment(args, exp, exp_root):
                                     pcb_name=pcb_short)
                 _print_pair(pcb_name, ra, rb, "跨板", "单板")
 
+    elif exp == "F":
+        # 实验 F：出界惩罚强度消融（W_OUT_OF_BOUNDS_FINAL 高 vs 低）
+        # 假说：后期出界惩罚 20.0 >> 单步完成奖励(100/N_movable)，导致 Q 网络
+        # "只学规避惩罚、不学完成布局"。降低 W_OUT_OF_BOUNDS_FINAL 看是否改善学习。
+        boards = _scan_boards(args.data_dir, args.board or "")
+        for pcb_name, _f in boards:
+            pcb_short = pcb_name.replace(".kicad_pcb", "")
+            out_dir = os.path.join(exp_dir, pcb_short)
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            # 组1：高惩罚（原值 20，对照）
+            cfg1 = _patch_config(
+                args.config_path,
+                {"W_OUT_OF_BOUNDS_FINAL": 20},
+                os.path.join(out_dir, "config_oob20.txt"))
+            # 组2：低惩罚（假说修复，降至完成奖励同量级以下）
+            cfg2 = _patch_config(
+                args.config_path,
+                {"W_OUT_OF_BOUNDS_FINAL": 6},
+                os.path.join(out_dir, "config_oob6.txt"))
+            r1 = _run_one("oob20(原)", args, True, cfg1, pcb_name,
+                          os.path.join(out_dir, "oob20"))
+            r2 = _run_one("oob6(消融)", args, True, cfg2, pcb_name,
+                          os.path.join(out_dir, "oob6"))
+            if r1 and r2:
+                ra = r1.per_board_reward_history.get(pcb_name, [])
+                rb = r2.per_board_reward_history.get(pcb_name, [])
+                plot_reward_compare(ra, rb, ["oob20(原)", "oob6(消融)"],
+                                    os.path.join(out_dir, "reward_compare.png"),
+                                    pcb_name=pcb_short)
+                _print_pair(pcb_name, ra, rb, "oob20(原)", "oob6(消融)")
+
+    elif exp == "G":
+        # 实验 G：Curriculum 升温速度消融 + 多板泛化
+        # 假说：CURRICULUM_END_EP 决定出界惩罚从 2→20 的升温快慢。
+        #   快升温(150ep)：前期太早收紧，探索期大量出界惩罚压制学习。
+        #   慢升温(1500ep)：惩罚长时间宽松，后期可能来不及收紧出界行为。
+        #   默认(500ep)：原配置，作对照。
+        # 对每个扫描到的板都跑三档，同时验证跨板泛化是否一致。
+        boards = _scan_boards(args.data_dir, args.board or "")
+        for pcb_name, _f in boards:
+            pcb_short = pcb_name.replace(".kicad_pcb", "")
+            out_dir = os.path.join(exp_dir, pcb_short)
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            variants = [
+                ("fast_150", "快升温(150)", 150),
+                ("default_500", "默认(500)", 500),
+                ("slow_1500", "慢升温(1500)", 1500),
+            ]
+            results = {}  # name -> (runner, label)
+            for folder, label, end_ep in variants:
+                cfg = _patch_config(
+                    args.config_path,
+                    {"CURRICULUM_END_EP": end_ep},
+                    os.path.join(out_dir, f"config_{folder}.txt"))
+                r = _run_one(f"curriculum_{folder}({label})", args, True, cfg,
+                             pcb_name, os.path.join(out_dir, folder))
+                results[folder] = (r, label)
+            # 绘图与对比（两两对比 + 汇总表）
+            histories = {folder: (r.per_board_reward_history.get(pcb_name, [])
+                                  if r else []) for folder, (r, _) in results.items()}
+            labels = [label for _, label in results.values()]
+            # 三线叠加图
+            plot_reward_compare(histories["fast_150"], histories["default_500"],
+                                [labels[0], labels[1]],
+                                os.path.join(out_dir, "reward_compare_fast_vs_default.png"),
+                                pcb_name=pcb_short)
+            plot_reward_compare(histories["slow_1500"], histories["default_500"],
+                                [labels[2], labels[1]],
+                                os.path.join(out_dir, "reward_compare_slow_vs_default.png"),
+                                pcb_name=pcb_short)
+            # 汇总表
+            logger.info("=" * 70)
+            logger.info(f"[{pcb_name}] Curriculum 升温速度对比汇总")
+            for folder in ("fast_150", "default_500", "slow_1500"):
+                h = histories[folder]
+                vals = [r for _, r in h]
+                if not vals:
+                    logger.info(f"  {results[folder][1]:14s}: 无数据")
+                    continue
+                n = max(1, len(vals) // 5)
+                logger.info(f"  {results[folder][1]:14s}: "
+                            f"episodes={len(vals)} 前20% R={sum(vals[:n])/n:8.2f}  "
+                            f"后20% R={sum(vals[-n:])/n:8.2f}  最佳 R={max(vals):8.2f}")
+            logger.info("=" * 70)
+
+    elif exp == "H":
+        # 实验 H：Early stopping（方向A - 后期策略漂移）
+        # 假说：训练拖满 total_episodes，后期无条件更新把早期学好的 best 策略冲掉。
+        #   通过「全局 best 停滞 N ep 就早停」验证：若早停组后期 R 明显更高/更稳，
+        #   说明后期退化确实源于「训练过久导致策略漂移」。
+        # 四组：无早停(对照) / 停滞300停 / 停滞100停 / 停滞30停
+        boards = _scan_boards(args.data_dir, args.board or "")
+        for pcb_name, _f in boards:
+            pcb_short = pcb_name.replace(".kicad_pcb", "")
+            out_dir = os.path.join(exp_dir, pcb_short)
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            variants = [
+                ("no_es", "无早停(对照)", 0),
+                ("es_300", "早停300ep", 300),
+                ("es_100", "早停100ep", 100),
+                ("es_30", "早停30ep", 30),
+            ]
+            results = {}
+            for folder, label, patience in variants:
+                cfg = _patch_config(args.config_path, {},
+                                    os.path.join(out_dir, f"config_{folder}.txt"))
+                sub = os.path.join(out_dir, folder)
+                r = _run_one(f"earlystop_{folder}({label})", args, True, cfg,
+                             pcb_name, sub, early_stop_patience=patience)
+                results[folder] = (r, label)
+            # 汇总表
+            logger.info("=" * 70)
+            logger.info(f"[{pcb_name}] Early stopping 对比汇总")
+            for folder, label in [(f, l) for f, (_, l) in results.items()]:
+                r = results[folder][0]
+                h = r.per_board_reward_history.get(pcb_name, []) if r else []
+                vals = [x for _, x in h]
+                if not vals:
+                    logger.info(f"  {label:14s}: 无数据")
+                    continue
+                n = max(1, len(vals) // 5)
+                logger.info(f"  {label:14s}: 实跑ep={len(vals):4d}  "
+                            f"前20% R={sum(vals[:n])/n:8.2f}  "
+                            f"后20% R={sum(vals[-n:])/n:8.2f}  最佳 R={max(vals):8.2f}")
+            logger.info("=" * 70)
+
+    elif exp == "I":
+        # 实验 I（治本）：诊断发现两个病根——ε 衰减太慢(ep198 仍 0.39) + Q 值发散(loss 60~200)
+        # fix_eps     : 仅加快 ε 衰减 (EPSILON_DECAY_EPISODES=300, ε 提前降到底)
+        # fix_eps_reg : ε 快衰减 + 加强 BC 值正则 (BC_REG_VALUE_LAMBDA 10→50) 压 Q 值
+        # 对照组：es_200 原配置（复现诊断结果）
+        boards = _scan_boards(args.data_dir, args.board or "")
+        for pcb_name, _f in boards:
+            pcb_short = pcb_name.replace(".kicad_pcb", "")
+            out_dir = os.path.join(exp_dir, pcb_short)
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            variants = [
+                ("ctrl_es200", "对照(原配置)", {}),
+                ("fix_eps", "仅ε快衰减", {"EPSILON_DECAY_EPISODES": 300}),
+                ("fix_eps_reg", "ε快衰减+强值正则", {"EPSILON_DECAY_EPISODES": 300,
+                                                     "BC_REG_VALUE_LAMBDA": 50}),
+            ]
+            results = {}
+            for folder, label, ov in variants:
+                cfg = _patch_config(args.config_path, ov,
+                                    os.path.join(out_dir, f"config_{folder}.txt"))
+                sub = os.path.join(out_dir, folder)
+                r = _run_one(f"fix_{folder}({label})", args, True, cfg,
+                             pcb_name, sub, early_stop_patience=200)
+                results[folder] = (r, label)
+            # 汇总表
+            logger.info("=" * 70)
+            logger.info(f"[{pcb_name}] 治本实验(I) 对比汇总 (early_stop_patience=200)")
+            for folder, label in [(f, l) for f, (_, l) in results.items()]:
+                r = results[folder][0]
+                h = r.per_board_reward_history.get(pcb_name, []) if r else []
+                vals = [x for _, x in h]
+                if not vals:
+                    logger.info(f"  {label:16s}: 无数据")
+                    continue
+                n = max(1, len(vals) // 5)
+                logger.info(f"  {label:16s}: 实跑ep={len(vals):4d}  "
+                            f"前20% R={sum(vals[:n])/n:8.2f}  "
+                            f"后20% R={sum(vals[-n:])/n:8.2f}  最佳 R={max(vals):8.2f}")
+            logger.info("=" * 70)
+
+    elif exp == "J":
+        # 实验 J（治本·Q值尺度）：诊断发现 BC 交叉熵 logits 尺度无约束(±30~100)，
+        # 与 RL 归一化 reward(±1~3) 错配 → loss 60+ 永不收敛、reward 震荡±160。
+        # 修复：BC 后缩放 Q 输出层(×factor) 适配 reward 尺度。
+        # 组1 ctrl        : 不缩放(复现)     组2 fix_q01  : 缩放×0.1
+        # 组3 fix_q01_eps : 缩放×0.1 + ε快衰减(EPSILON_DECAY_EPISODES=300)
+        boards = _scan_boards(args.data_dir, args.board or "")
+        for pcb_name, _f in boards:
+            pcb_short = pcb_name.replace(".kicad_pcb", "")
+            out_dir = os.path.join(exp_dir, pcb_short)
+            if os.path.isdir(out_dir):
+                shutil.rmtree(out_dir)
+            os.makedirs(out_dir, exist_ok=True)
+            variants = [
+                ("ctrl", "对照(不缩放)", {"Q_SCALE_FACTOR": 0}),
+                ("fix_q01", "Q×0.1", {"Q_SCALE_FACTOR": 0.1}),
+                ("fix_q01_eps", "Q×0.1+ε快衰减", {"Q_SCALE_FACTOR": 0.1,
+                                                   "EPSILON_DECAY_EPISODES": 300}),
+            ]
+            results = {}
+            for folder, label, ov in variants:
+                cfg = _patch_config(args.config_path, ov,
+                                    os.path.join(out_dir, f"config_{folder}.txt"))
+                sub = os.path.join(out_dir, folder)
+                r = _run_one(f"J_{folder}({label})", args, True, cfg,
+                             pcb_name, sub, early_stop_patience=200)
+                results[folder] = (r, label)
+            # 汇总表
+            logger.info("=" * 70)
+            logger.info(f"[{pcb_name}] 治本实验(J·Q值尺度) 对比汇总 (early_stop_patience=200)")
+            for folder, label in [(f, l) for f, (_, l) in results.items()]:
+                r = results[folder][0]
+                h = r.per_board_reward_history.get(pcb_name, []) if r else []
+                vals = [x for _, x in h]
+                if not vals:
+                    logger.info(f"  {label:16s}: 无数据")
+                    continue
+                n = max(1, len(vals) // 5)
+                logger.info(f"  {label:16s}: 实跑ep={len(vals):4d}  "
+                            f"前20% R={sum(vals[:n])/n:8.2f}  "
+                            f"后20% R={sum(vals[-n:])/n:8.2f}  最佳 R={max(vals):8.2f}")
+            logger.info("=" * 70)
+
     logger.info(f"实验 {exp} 完成，产物目录: {exp_dir}")
     return exp_dir
 
@@ -291,9 +524,9 @@ def run():
     exp_root = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "result", "experiments")
     exps = [e.strip().upper() for e in args.experiment.split(",") if e.strip()]
-    invalid = [e for e in exps if e not in ("A", "D", "E")]
+    invalid = [e for e in exps if e not in ("A", "D", "E", "F", "G", "H", "I", "J")]
     if invalid:
-        logger.error(f"未知实验类型: {invalid}，合法值为 A/D/E（可逗号组合）")
+        logger.error(f"未知实验类型: {invalid}，合法值为 A/D/E/F/G/H/I/J（可逗号组合）")
         sys.exit(1)
     logger.info(f"待执行实验（顺序）: {exps}")
     for exp in exps:

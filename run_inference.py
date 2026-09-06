@@ -515,6 +515,15 @@ def main():
         "--inference-epsilon", type=float, default=0.01,
         help="贪心推理时的探索率（打破确定性死锁，默认 0.01；调高如 0.15 可公平评估策略）",
     )
+    parser.add_argument(
+        "--deadlock-preview", action="store_true",
+        help="开启 1c 防死锁前瞻预演（forward checking）：落子前检查剩余元件仍可行",
+    )
+    parser.add_argument(
+        "--mrv-order", action="store_true",
+        help="路线3：开启 MRV 顺序约束（step0 只放行剩余合法落子最少的元件；"
+             "需与训练同开，仅用于对应重训模型的推理）",
+    )
     args = parser.parse_args()
 
     # ---- 确定 PCB 文件列表 ----
@@ -540,6 +549,12 @@ def main():
     _config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "config"))
     Config.load_from_file(os.path.join(_config_dir, "argument.txt"))
     Config.load_dims_from_file(os.path.join(_config_dir, "admin.txt"))
+    if args.deadlock_preview:
+        Config.ENABLE_DEADLOCK_PREVIEW = True
+        logger.info("1c 防死锁前瞻预演: ON")
+    if args.mrv_order:
+        Config.ENABLE_MRV_ORDER = True
+        logger.info("路线3 MRV 顺序约束: ON")
 
     device = torch.device("cpu")
     agent = DQNAgent(

@@ -29,6 +29,8 @@ class Config:
     W_DECOUPLING: float = 10.0
     W_LARGE_COMP: float = 5.0
     W_COMPLETION: float = 200.0
+    # 面积归一化惩罚的最小分母 (mm²)：防止极小元件导致重叠/出界比例被放大
+    MIN_NORM_AREA: float = 1.0
 
     # Reward Shaping：品质项时序控制
     QUALITY_START_EP: int = 10000
@@ -72,6 +74,27 @@ class Config:
     # 对齐 global_features 中的归一化尺度。需重新训练。
     NORMALIZE_OBS: bool = False
 
+    # 层动作约束开关（任务级）
+    # True  = 锁定所有元件到原始层（单面板/复刻任务，堵"翻面钻空子"reward hacking）
+    # False = 按 footprint 物理层约束（SMD 锁焊盘面，PTH 可双面；未来生成任务）
+    SINGLE_LAYER: bool = True
+
+    # ---- 1c 防死锁前瞻预演（forward checking，默认关，评测/推理时开启） ----
+    # 1b 只保证"这一步放下去自己合法"；1c 额外保证"放下去后，剩余未放置元件
+    # 每个都还至少有一个合法位置"，把"顺序死锁"拦在发生之前。
+    # 默认 False：不改变现有训练/推理基线；需要时由评测脚本 --deadlock-preview 开启。
+    ENABLE_DEADLOCK_PREVIEW: bool = False
+    # 只在剩余元件 ≤ 此数时启用 1c（死锁集中发生在收尾阶段，前期空区大零开销）
+    DEADLOCK_PREVIEW_MAX_REMAINING: int = 3
+
+    # ---- 路线3：MRV 顺序约束（Minimum Remaining Values，默认关） ----
+    # 死锁元凶 = "最后才放位置最少的元件"（顺序死锁）。MRV：step0 只放行
+    # 当前剩余合法落子最少的未放元件，把最受约束的元件提前处理，从顺序上
+    # 消除"最后一个被堵死"。判定口径与 1b/1c 预演一致（按 (位置, 层) 计数）。
+    # 注意：MRV 改变训练/推理的 step0 动作分布（自由选元件 → 排他顺序），
+    # 必须训练与推理同步开启并重训（推理端突然开启会与训练分布失配）。
+    ENABLE_MRV_ORDER: bool = False
+
     # ---- 专家轨迹注入 ----
     EXPERT_TOTAL_TRANSITIONS: int = 20000   # 目标专家 transition 总数（达到即停）
     EXPERT_MAX_TRAJECTORIES: int = 5000     # 最大轨迹数安全上限（防死循环）
@@ -79,6 +102,7 @@ class Config:
     EXPERT_POS_NOISE_PROB: float = 0.2
     EXPERT_ROT_NOISE_PROB: float = 0.1
     EXPERT_BC_EPOCHS: int = 50
+    EXPERT_APPLY_PENALTIES: bool = True  # 专家 reward 是否携带惩罚项（True=与 RL 环境一致；False=仅品质奖励，实验 D 对照用）
     EXPERT_BUFFER_RATIO: float = 0.7
     EXPERT_BUFFER_MULTIPLIER: int = 5
     PER_ALPHA: float = 0.6
@@ -114,7 +138,13 @@ class Config:
                         try:
                             val = float(val_str)
                         except ValueError:
-                            continue
+                            # 支持 bool（True/False），用于 EXPERT_APPLY_PENALTIES 等开关参数
+                            if val_str.lower() == "true":
+                                val = True
+                            elif val_str.lower() == "false":
+                                val = False
+                            else:
+                                continue
                     if hasattr(cls, key):
                         setattr(cls, key, val)
         except FileNotFoundError:
@@ -377,6 +407,12 @@ class PCBLayoutEnv(gym.Env):
            abs(placed_h - component.footprint_h) > Config.CELL_SIZE:
             return self._invalid_action("AABB size mismatch with footprint")
 
+        # 4.5 层物理合法性校验（SINGLE_LAYER / footprint 推导）
+        if lay_idx not in self._allowed_layers_of(component):
+            return self._invalid_action(
+                f"layer {lay_idx} not allowed for {component.id}"
+            )
+
         # 5. 更新元件状态
         component.bbox = (x1, y1, x2, y2)
         component.rotation = rot_idx
@@ -589,15 +625,360 @@ class PCBLayoutEnv(gym.Env):
             for i, comp in enumerate(self.movable_list[:n_valid]):
                 if not comp.is_placed and not comp.is_fixed:
                     mask[i] = True
+            # 路线3：MRV 顺序约束（默认关，训练与推理需同步开启并重训）
+            # step0 只放行"当前剩余合法落子最少"的未放元件（tie 全放行），
+            # 把最受约束的元件提前处理，消除"最后才放最挤元件"的顺序死锁。
+            if (getattr(Config, "ENABLE_MRV_ORDER", False) and mask.any()):
+                mrv_mask = self._mrv_step0_mask()
+                if mrv_mask is not None and mrv_mask.any():
+                    return mrv_mask
             return mask
 
         if step_id == 1:
-            return np.arange(Config.GRID_W) < self.grid_width
+            # 1a: x2 出界硬屏蔽（gx1 + w_cell 越过板框右缘的坐标直接排除）
+            base = (np.arange(Config.GRID_W) < self.grid_width) & (
+                np.arange(Config.GRID_W) + self._pending_w_cell() <= self.grid_width
+            )
+            # 1b: 碰撞预演——排除"两层都无可行 y"的 x 候选（必败坐标）
+            if self._pending_comp_idx >= 0 and base.any():
+                comp = self.movable_list[self._pending_comp_idx]
+                w_cell = self._pending_w_cell()
+                h_cell = self._pending_h_cell()
+                mask = base.copy()
+                for gx1 in np.nonzero(mask)[0]:
+                    if not self._preview_has_any_layer(comp, int(gx1), w_cell, h_cell):
+                        mask[gx1] = False
+                # 防御：全被挡 → 回退到只出界 mask（宁可失败一次，不可无动作可选）
+                if mask.any():
+                    return mask
+            return base
 
         if step_id == 2:
-            return np.arange(Config.GRID_H) < self.grid_height
+            # 1a: y2 出界硬屏蔽（gy1 + h_cell 越过板框下缘的坐标直接排除）
+            base = (np.arange(Config.GRID_H) < self.grid_height) & (
+                np.arange(Config.GRID_H) + self._pending_h_cell() <= self.grid_height
+            )
+            # 1b: 碰撞预演——排除两层都与 fixed/已放置同层硬重叠的 y 候选
+            if self._pending_comp_idx >= 0 and self._pending_gx1 >= 0 and base.any():
+                comp = self.movable_list[self._pending_comp_idx]
+                w_cell = self._pending_w_cell()
+                h_cell = self._pending_h_cell()
+                mask = base.copy()
+                for gy1 in np.nonzero(mask)[0]:
+                    if not self._preview_position_any_layer(
+                        comp, self._pending_gx1, int(gy1), w_cell, h_cell
+                    ):
+                        mask[gy1] = False
+                # 1c: 防死锁前瞻——1b 只保证"这一步自己合法"，这里再加
+                # "放下去后剩余元件仍可行"检查（forward checking）。死锁集中
+                # 在收尾阶段（剩余 ≤ DEADLOCK_PREVIEW_MAX_REMAINING）才启用，
+                # 前期空区大、无死锁风险，避免无谓扫描。
+                if (getattr(Config, "ENABLE_DEADLOCK_PREVIEW", False)
+                        and mask.any()):
+                    remaining = sum(1 for c in self.movable_list
+                                    if not c.is_placed)
+                    if remaining <= getattr(Config,
+                                            "DEADLOCK_PREVIEW_MAX_REMAINING", 3):
+                        area = self.valid_area
+                        spots = self._collect_other_free_spots(
+                            self._pending_comp_idx)
+                        if spots:
+                            dl_mask = mask.copy()
+                            for gy1 in np.nonzero(mask)[0]:
+                                px1 = area[0] + self._pending_gx1 * Config.CELL_SIZE
+                                py1 = area[1] + int(gy1) * Config.CELL_SIZE
+                                px2 = px1 + w_cell * Config.CELL_SIZE
+                                py2 = py1 + h_cell * Config.CELL_SIZE
+                                if not self._preview_place_keeps_others_feasible(
+                                        self._pending_comp_idx,
+                                        px1, py1, px2, py2, spots):
+                                    dl_mask[gy1] = False
+                            # 防御：1c 把合法位置全挡掉（当前元件只能放在
+                            # 会堵死别人的位置）→ 回退 1b mask，宁放行一次
+                            # 也不无动作可选（与 1b 的防御回退同哲学）。
+                            if dl_mask.any():
+                                mask = dl_mask
+                if mask.any():
+                    return mask
+            return base
+
+        if step_id == 4:
+            # 1b 补全：层预演——step1/2 保证位置至少一层合法，此处把 mask
+            # 缩到"当前位置实际合法的层"，避免选到必败层（探索期 lay 随机是
+            # 残留失败的唯一来源）。
+            if (self._pending_comp_idx >= 0 and self._pending_gx1 >= 0
+                    and self._pending_gy1 >= 0):
+                comp = self.movable_list[self._pending_comp_idx]
+                legal = self._preview_layer_legal(
+                    comp, self._pending_gx1, self._pending_gy1,
+                    self._pending_w_cell(), self._pending_h_cell(),
+                )
+                if any(legal):
+                    return np.array(legal, dtype=bool)
+            return None
 
         return None
+
+    # ---- 层动作约束（任务级 SINGLE_LAYER + footprint 物理层） ----
+
+    def _allowed_layers_of(self, comp) -> Tuple[int, ...]:
+        """元件的可行动作层集。
+
+        SINGLE_LAYER=True：锁定到原始层（探索/复刻任务，堵 reward hacking）；
+        SINGLE_LAYER=False：按 footprint 推导的物理允许层（未来生成任务）。
+
+        未来「从需求出板」迁移点：SINGLE_LAYER 读需求输入，allowed_layers
+        读封装库 footprint 的 pad 层，本函数接口不变。
+        """
+        if Config.SINGLE_LAYER:
+            return (comp.layer,)
+        return tuple(comp.allowed_layers)
+
+    # ---- 碰撞预演辅助（step1/2/4 的 mask 过滤用，与 _detect_collisions 同口径） ----
+
+    def _pending_w_cell(self) -> int:
+        """当前 pending 元件的网格宽度（与 _assemble_action 同口径）。"""
+        if self._pending_comp_idx < 0:
+            return 1
+        comp = self.movable_list[self._pending_comp_idx]
+        return max(1, int(comp.footprint_w / Config.CELL_SIZE))
+
+    def _pending_h_cell(self) -> int:
+        """当前 pending 元件的网格高度（与 _assemble_action 同口径）。"""
+        if self._pending_comp_idx < 0:
+            return 1
+        comp = self.movable_list[self._pending_comp_idx]
+        return max(1, int(comp.footprint_h / Config.CELL_SIZE))
+
+    def _preview_others(self, comp, lay: int) -> List:
+        """预演碰撞对象：与指定层相同的 fixed + 已放置元件。"""
+        others = list(self.fixed_list)
+        others += [self.kicad.components[rid] for rid in self.placed_list]
+        return [o for o in others if o.layer == lay and o.id != comp.id]
+
+    def _preview_blocks_any(self, comp, blockers, x1, y1, x2, y2) -> bool:
+        """预演：bbox 是否与任一 blocker 硬重叠（口径与 _detect_collisions 一致）。"""
+        for o in blockers:
+            threshold = Config.spacing_threshold_for(
+                comp.package_type, o.package_type
+            )
+            hard, _ = PCBUtils.bbox_overlap_penalty(
+                (x1, y1, x2, y2), o.bbox, threshold
+            )
+            if hard > 0.0:
+                return True
+        return False
+
+    def _preview_position_any_layer(self, comp, gx1, gy1, w_cell, h_cell) -> bool:
+        """预演：网格位置 (gx1,gy1) 在 Top/Bot 至少一层无碰撞且不越界。
+
+        层是第 5 步子动作才决定，故对可行动作集逐层验证：最终所选层若在
+        该位置合法即放行（零误杀）；全部可行动作集全非法才判定为必败位置。
+        """
+        area = self.valid_area
+        x1 = area[0] + gx1 * Config.CELL_SIZE
+        y1 = area[1] + gy1 * Config.CELL_SIZE
+        x2 = x1 + w_cell * Config.CELL_SIZE
+        y2 = y1 + h_cell * Config.CELL_SIZE
+        # 出界/keepout 判定与 env.step 完全同口径（mm 坐标，避免网格 round 误差）
+        if PCBUtils.out_of_bounds_area((x1, y1, x2, y2), area) > 0.0:
+            return False
+        if PCBUtils.check_keepout((x1, y1, x2, y2), self.keepout_zones):
+            return False
+        for lay in self._allowed_layers_of(comp):
+            blockers = [o for o in self._preview_others(comp, lay)
+                        if o.bbox[2] > x1 and o.bbox[0] < x2
+                        and o.bbox[3] > y1 and o.bbox[1] < y2]
+            if not self._preview_blocks_any(comp, blockers, x1, y1, x2, y2):
+                return True
+        return False
+
+    def _preview_layer_legal(self, comp, gx1, gy1, w_cell, h_cell) -> List[bool]:
+        """预演：网格位置 (gx1,gy1) 在可行动作层各层是否无碰撞（step4 层 mask）。
+
+        固定返回长度 2（对应 Discrete(2) 层动作）：非物理允许层恒 False，
+        由 _allowed_layers_of（SINGLE_LAYER / footprint 推导）过滤。
+        """
+        area = self.valid_area
+        x1 = area[0] + gx1 * Config.CELL_SIZE
+        y1 = area[1] + gy1 * Config.CELL_SIZE
+        x2 = x1 + w_cell * Config.CELL_SIZE
+        y2 = y1 + h_cell * Config.CELL_SIZE
+        if PCBUtils.out_of_bounds_area((x1, y1, x2, y2), area) > 0.0:
+            return [False, False]
+        if PCBUtils.check_keepout((x1, y1, x2, y2), self.keepout_zones):
+            return [False, False]
+        legal = [False, False]
+        for lay in self._allowed_layers_of(comp):
+            blockers = [o for o in self._preview_others(comp, lay)
+                        if o.bbox[2] > x1 and o.bbox[0] < x2
+                        and o.bbox[3] > y1 and o.bbox[1] < y2]
+            legal[lay] = not self._preview_blocks_any(comp, blockers, x1, y1, x2, y2)
+        return legal
+
+    def _preview_has_any_layer(self, comp, gx1, w_cell, h_cell) -> bool:
+        """预演：x1=gx1 时，可行动作层至少一层存在无碰撞且不越界的 y1。"""
+        area = self.valid_area
+        x1 = area[0] + gx1 * Config.CELL_SIZE
+        x2 = x1 + w_cell * Config.CELL_SIZE
+        for lay in self._allowed_layers_of(comp):
+            blockers = [o for o in self._preview_others(comp, lay)
+                        if o.bbox[2] > x1 and o.bbox[0] < x2]
+            for gy1 in range(self.grid_height):
+                y1 = area[1] + gy1 * Config.CELL_SIZE
+                y2 = y1 + h_cell * Config.CELL_SIZE
+                if PCBUtils.out_of_bounds_area((x1, y1, x2, y2), area) > 0.0:
+                    continue
+                if PCBUtils.check_keepout((x1, y1, x2, y2), self.keepout_zones):
+                    continue
+                if not self._preview_blocks_any(comp, blockers, x1, y1, x2, y2):
+                    return True
+        return False
+
+    # ---- 1c 防死锁前瞻预演（forward checking） ----
+    # 与 1b 同口径的"位置合法"判定，但多查一层：pending 元件占据某位置后，
+    # 其余每个未放置元件是否仍至少有一个合法落点。若某个元件被彻底堵死，
+    # 该候选就是"必死位置"（放下去必然死锁）→ 从 mask 剔除。
+
+    def _collect_other_free_spots(self, exclude_comp_idx: int):
+        """收集"其它未放置元件"各自的全部合法落子（当前占用下）。
+
+        Returns:
+            {comp_id: [(x1, y1, x2, y2, lay), ...]} —— 仅含未放置且非
+            exclude_comp 的元件。空 dict 表示没有需要守护的元件。
+        """
+        area = self.valid_area
+        cell = Config.CELL_SIZE
+        spots = {}
+        for o in self.movable_list:
+            if o.is_placed or o.id == exclude_comp_idx:
+                continue
+            ow = max(1, int(o.footprint_w / cell))
+            oh = max(1, int(o.footprint_h / cell))
+            o_list = []
+            for lay in self._allowed_layers_of(o):
+                blockers = self._preview_others(o, lay)
+                for gx1 in range(self.grid_width):
+                    x1 = area[0] + gx1 * cell
+                    x2 = x1 + ow * cell
+                    if x2 > area[2]:          # x 越界：gx1 递增后只会更越界
+                        break
+                    for gy1 in range(self.grid_height):
+                        y1 = area[1] + gy1 * cell
+                        y2 = y1 + oh * cell
+                        if y2 > area[3]:
+                            break
+                        if PCBUtils.check_keepout((x1, y1, x2, y2),
+                                                  self.keepout_zones):
+                            continue
+                        if self._preview_blocks_any(o, blockers,
+                                                    x1, y1, x2, y2):
+                            continue
+                        o_list.append((x1, y1, x2, y2, lay))
+            spots[o.id] = o_list
+        return spots
+
+    def _preview_place_keeps_others_feasible(self, comp_idx: int,
+                                             x1: float, y1: float,
+                                             x2: float, y2: float,
+                                             spots) -> bool:
+        """1c 判定：comp 占据 (x1,y1)-(x2,y2) 后，其余未放置元件仍可行？
+
+        层是第 5 步子动作才决定：对 comp 的可行动作层逐层尝试，只要存在
+        一层选择使放后所有其它元件都还有落点 → 放行（零误杀，与 1b 同哲学）。
+        """
+        comp = self.movable_list[comp_idx]
+        others = [(cid, self.kicad.components[cid]) for cid, lst in spots.items()]
+        for lay_c in self._allowed_layers_of(comp):
+            all_ok = True
+            for cid, o in others:
+                ok = False
+                th = Config.spacing_threshold_for(comp.package_type,
+                                                  o.package_type)
+                for q in spots[cid]:
+                    qx1, qy1, qx2, qy2, qlay = q
+                    if (qlay == lay_c and qx1 < x2 and qx2 > x1
+                            and qy1 < y2 and qy2 > y1):
+                        hard, _ = PCBUtils.bbox_overlap_penalty(
+                            (qx1, qy1, qx2, qy2), (x1, y1, x2, y2), th)
+                        if hard > 0.0:
+                            continue   # 该落点被 P 占掉，试 o 的下一个落点
+                    ok = True
+                    break
+                if not ok:
+                    all_ok = False     # 某元件被 P 彻底堵死 → 这层选择不行
+                    break
+            if all_ok:
+                return True
+        return False
+
+    # ---- 路线3：MRV 顺序约束（Minimum Remaining Values，默认关） ----
+    # 死锁元凶 = "最后才放位置最少的元件"。MRV：step0 优先放当前剩余合法
+    # 落子最少的未放元件，把最危险的元件提前处理。判定口径与 1b/1c 预演
+    # 完全一致（mm bbox + 越界 + keepout + bbox_overlap_penalty），按
+    # (位置, 层) 对计数，保证"合法"定义与 env.step 同口径。
+
+    def _count_free_spot_all(self, comp) -> int:
+        """统计 comp 在当前局面的全部合法落子数（(网格位置, 层) 对计数）。
+
+        Args:
+            comp: movable_list 中的元件（未放置）
+
+        Returns:
+            合法 (x1, y1, x2, y2, layer) 落子总数；0 = 已被彻底堵死。
+        """
+        area = self.valid_area
+        cell = Config.CELL_SIZE
+        ow = max(1, int(comp.footprint_w / cell))
+        oh = max(1, int(comp.footprint_h / cell))
+        count = 0
+        for lay in self._allowed_layers_of(comp):
+            blockers = self._preview_others(comp, lay)
+            for gx1 in range(self.grid_width):
+                x1 = area[0] + gx1 * cell
+                x2 = x1 + ow * cell
+                if x2 > area[2]:          # x 越界：gx1 递增后只会更越界
+                    break
+                for gy1 in range(self.grid_height):
+                    y1 = area[1] + gy1 * cell
+                    y2 = y1 + oh * cell
+                    if y2 > area[3]:
+                        break
+                    if PCBUtils.check_keepout((x1, y1, x2, y2),
+                                              self.keepout_zones):
+                        continue
+                    if self._preview_blocks_any(comp, blockers,
+                                                x1, y1, x2, y2):
+                        continue
+                    count += 1
+        return count
+
+    def _mrv_step0_mask(self) -> Optional[np.ndarray]:
+        """MRV step0 排他掩码：只放行"剩余合法落子最少"的未放元件。
+
+        Returns:
+            固定长度 (MAX_MOVABLE,) bool 向量；返回 None 表示回退 base mask：
+              - 剩余候选 ≤ 1：无选择余地，MRV 无意义；
+              - 存在合法落子 = 0 的元件：死锁已成定局（该元件以后只会更挤，
+                其它元件放完也救不回）→ 回退 base，宁失败一次不可无动作可选
+                （与 1b/1c 防御回退同哲学）。
+        """
+        n_valid = min(self.N_movable, Config.MAX_MOVABLE)
+        candidates = [i for i in range(n_valid)
+                      if not self.movable_list[i].is_placed
+                      and not self.movable_list[i].is_fixed]
+        if len(candidates) <= 1:
+            return None
+        counts = {i: self._count_free_spot_all(self.movable_list[i])
+                  for i in candidates}
+        min_c = min(counts.values())
+        if min_c <= 0:
+            return None
+        mask = np.zeros(Config.MAX_MOVABLE, dtype=bool)
+        for i in candidates:
+            if counts[i] == min_c:
+                mask[i] = True
+        return mask
 
     def _get_quality_scale(self) -> float:
         """品质项权重缩放系数，基于 current_episode 线性升温。
@@ -643,6 +1024,10 @@ class PCBLayoutEnv(gym.Env):
         for other in all_fixed_comps:
             if other.id == component.id:
                 continue
+            # 层感知修复：不同层（Top/Bottom）元件处于不同物理面，不产生
+            # 硬重叠/软间距冲突。双面 PCB 中 U1(Top) 与 CN3(Bottom) 可叠放。
+            if other.layer != component.layer:
+                continue
             threshold = Config.spacing_threshold_for(
                 component.package_type, other.package_type
             )
@@ -670,10 +1055,11 @@ class PCBLayoutEnv(gym.Env):
         total_out_of_bounds: float,
         has_violations: bool,
         quality_scale: Optional[float] = None,
+        apply_penalties: bool = True,
     ) -> float:
         """计算 reward。
 
-        惩罚项（始终生效）：硬重叠 + 软间距 + 出界。
+        惩罚项（apply_penalties=True 时生效）：硬重叠 + 软间距 + 出界。
         基础奖励（始终生效）：完成奖励。
         品质奖励（quality_scale 升温控制）：Net 聚合度 + 拥塞均衡度 + 去耦电容 + 大元件排名。
 
@@ -685,6 +1071,9 @@ class PCBLayoutEnv(gym.Env):
             has_violations: 是否存在任何违规
             quality_scale: 品质项权重缩放系数；None 时按 current_episode 升温
                 （训练路径），否则用传入值（专家轨迹传 1.0 表示理想布局满分）
+            apply_penalties: 是否应用硬重叠/软间距/出界惩罚项。训练路径始终
+                True；专家轨迹生成时由 EXPERT_APPLY_PENALTIES 控制（False=
+                仅品质奖励，用于对照实验 D 验证 reward 尺度错配假说）。
 
         Returns:
             标量 reward 值
@@ -694,21 +1083,38 @@ class PCBLayoutEnv(gym.Env):
         reward = 0.0
         breakdown = {}
 
-        # ========== 惩罚项（始终生效） ==========
+        # ========== 惩罚项（apply_penalties=True 时生效） ==========
+        # 归一化修复：面积类惩罚（硬重叠、出界）原本直接乘面积(mm²)，量级可达
+        # -1000+（20 × 40mm²），而单步成功奖励上限仅 ~W_COMPLETION=100，
+        # 惩罚比奖励大一个数量级，导致极端负值主导梯度、训练发散不收敛。
+        # 现将面积惩罚归一化为"比例惩罚"（重叠/出界面积 ÷ 元件自身面积 ∈[0,1]），
+        # 单步惩罚上限 = 权重本身（如 -20），与奖励同量级，梯度稳定。
 
-        # 硬重叠
-        penalty_hard = Config.W_OVERLAP_HARD * total_hard_overlap
-        reward -= penalty_hard
+        # 元件自身面积（归一化分母）；bbox 总有正面积，安全
+        comp_area = max(0.0, (component.bbox[2] - component.bbox[0])) * max(
+            0.0, (component.bbox[3] - component.bbox[1])
+        )
+        norm_denom = max(comp_area, Config.MIN_NORM_AREA)
+
+        # 硬重叠：重叠面积占比
+        overlap_ratio = total_hard_overlap / norm_denom
+        penalty_hard = Config.W_OVERLAP_HARD * min(overlap_ratio, 1.0)
+        if apply_penalties:
+            reward -= penalty_hard
         breakdown["overlap_hard"] = -penalty_hard
 
-        # 软间距
+        # 软间距：连续惩罚，量级本就较小，保留但以阈值为界封顶，避免极端
         penalty_soft = Config.W_OVERLAP_SOFT * total_soft_spacing
-        reward -= penalty_soft
+        penalty_soft = min(penalty_soft, Config.W_OVERLAP_SOFT)
+        if apply_penalties:
+            reward -= penalty_soft
         breakdown["overlap_soft"] = -penalty_soft
 
-        # 出界
-        penalty_oob = self.W_OUT_OF_BOUNDS_CURRENT * total_out_of_bounds
-        reward -= penalty_oob
+        # 出界：出界面积占比
+        oob_ratio = total_out_of_bounds / norm_denom
+        penalty_oob = self.W_OUT_OF_BOUNDS_CURRENT * min(oob_ratio, 1.0)
+        if apply_penalties:
+            reward -= penalty_oob
         breakdown["out_of_bounds"] = -penalty_oob
 
         # ========== 品质奖励（quality_scale 升温控制） ==========

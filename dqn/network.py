@@ -1,4 +1,4 @@
-"""DQN 网络：5-Head 自回归结构 + Dict 观测 + 共享 Slot Encoder。
+﻿"""DQN 网络：5-Head 自回归结构 + Dict 观测 + 共享 Slot Encoder。
 
 基于 SPEC v2.3：Dict 观测 → slot encoder (共享权重) → 分支。
 Step 0 直接走 per-slot head，Step 1-4 走 mean pooling + shared body。

@@ -34,10 +34,22 @@ class MockComponent:
     # 默认值对齐 kicad_utils.Component（0.0），避免遗漏字段时产生假数据
     footprint_w: float = 0.0
     footprint_h: float = 0.0
+    # 焊盘层事实（与 kicad_utils.Component 对齐；默认宽松，JSON 未透传时不崩）
+    pad_layers: Tuple[int, ...] = (0, 1)
+    has_pth: bool = False
 
     @property
     def footprint_area(self) -> float:
         return self.footprint_w * self.footprint_h
+
+    @property
+    def allowed_layers(self) -> Tuple[int, ...]:
+        """物理可放置层：PTH 双面自由；纯 SMD 锁定焊盘所在面；无焊盘默认宽松。"""
+        if self.has_pth:
+            return (0, 1)
+        if not self.pad_layers:
+            return (0, 1)
+        return tuple(sorted(set(self.pad_layers)))
 
     @property
     def center(self) -> Tuple[float, float]:

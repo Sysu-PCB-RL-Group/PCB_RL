@@ -7,6 +7,7 @@ Phase 2: RL 训练 — 正常 DQN + 20% 专家常驻 buffer + PER 优先经验�
 """
 
 import glob
+import time
 import logging
 import json
 import math
@@ -58,6 +59,13 @@ class Runner:
         if hasattr(args, "total_episodes") and args.total_episodes is not None:
             Config.TOTAL_EPISODES = args.total_episodes
 
+        # 路线3：MRV 顺序约束（训练侧改动，需与推理同步开启并重训做对照）
+        if getattr(args, "mrv_order", False):
+            Config.ENABLE_MRV_ORDER = True
+            logger.info(
+                "路线3 MRV 顺序约束: ON (step0 只放行剩余合法落子最少的元件)"
+            )
+
         # 随机种子
         seed = getattr(args, "seed", 114514)
         random.seed(seed)
@@ -108,6 +116,22 @@ class Runner:
         # 优先于 Config.EXPERT_TRANSITIONS_DIR（字符串路径无法经 argument.txt 注入）
         self._expert_transitions_dir_override: str = getattr(
             args, "expert_transitions_dir", "") or ""
+
+        # ---- 失败 step 监控（诊断坏循环：失败类型分布，零行为改动） ----
+        # 窗口累计，每次 _log_episode 实际打印后清零（窗口 = LOG_INTERVAL ep，
+        # 首窗含 warmup）。by_type[n]=触发该违规的失败 step 数（一次失败可计多种），
+        # penalty=累计惩罚绝对值；oob_only=纯出界失败（无重叠/keepout，1a 修复的靶点）。
+        self._fail_window: dict = {
+            "episodes": 0,          # 窗口内 episode 数
+            "fail_steps": 0,        # 失败 step 总数（reward < 0）
+            "max_consecutive_fail": 0,  # 同一元件连续失败最长串（坏循环直接证据）
+            "oob_only": 0,          # 纯出界失败次数（无重叠/软间距/keepout）
+            "fuse_triggered": 0,    # 保险丝触发次数（连败 ≥ 阈值强制终止 episode）
+            "by_type": {t: {"n": 0, "penalty": 0.0} for t in
+                        ("overlap_hard", "overlap_soft", "out_of_bounds", "in_keepout")},
+        }
+        self._last_fail_comp: int = -1   # 上次失败的元件索引（连败串跟踪）
+        self._consecutive_fail: int = 0
 
     def run(self):
         """两阶段训练循环：Phase 1 BC 预训练 + Phase 2 RL + 专家注入。"""
@@ -230,6 +254,15 @@ class Runner:
         logger.info(f"Phase 2 RL training: {self.total_episodes} episodes (random board selection)")
         logger.info(f"Global best will be saved to: {os.path.join(self.save_dir, 'best_model.pt')}")
 
+        # early stopping：全局 best 停滞超过 patience 个 episode 则提前终止（0=不早停）
+        es_patience = int(getattr(self.args, "early_stop_patience", 0) or 0)
+        es_last_best_ep = 0  # 记录全局 best 被更新时的 episode_num
+        if es_patience > 0:
+            logger.info(
+                f"Early stopping ENABLED: stop after global best is stagnant for "
+                f"{es_patience} episodes (best_ep={self.global_best_episode})"
+            )
+
         for ep in range(self.total_episodes):
             self.episode_num += 1
 
@@ -262,6 +295,7 @@ class Runner:
                 self.global_best_pcb = pcb_name
                 ckpt_path = os.path.join(self.save_dir, "best_model.pt")
                 agent.save(ckpt_path)
+                es_last_best_ep = self.episode_num
                 logger.info(
                     f"[NEW GLOBAL BEST] R={self.global_best_reward:.2f} "
                     f"board={pcb_name} ep={self.global_best_episode} → {ckpt_path}"
@@ -278,6 +312,15 @@ class Runner:
             if board_ep % 100 == 0:
                 self._plot_loss_curve(pcb_name)
                 self._plot_reward_curve(pcb_name)
+
+            # early stopping：全局 best 停滞超过 patience 则提前终止
+            if es_patience > 0 and (self.episode_num - es_last_best_ep) >= es_patience:
+                logger.info(
+                    f"EARLY STOP: global best R={self.global_best_reward:.2f} "
+                    f"(ep={self.global_best_episode}) stagnant for {es_patience} episodes, "
+                    f"stopping at ep={self.episode_num} (planned {self.total_episodes})"
+                )
+                break
 
         # ---- 10. 训练结束：per-board 分析 & 全局汇总 ----
         for pcb_name in pcb_names:
@@ -343,6 +386,7 @@ class Runner:
             epsilon = self._compute_epsilon(pcb_name)
         env.W_OUT_OF_BOUNDS_CURRENT = self._compute_curriculum_weight(pcb_name)
         env.current_episode = ep_num  # quality_scale 升温依据
+        self._fail_window["episodes"] += 1  # 失败监控窗口 episode 计数（含 warmup）
 
         env.reset()
         env._reset_pending()
@@ -373,8 +417,54 @@ class Runner:
             step_count += 1
             placed_count = _info.get("placed_count", 0)
 
-            # ---- 写入 buffer（5 步按比例共享 reward） ----
+            # ---- 失败 step 监控（仅统计，不改任何行为） ----
+            # reward<0 的 step 即失败放置（has_violations=True，元件没放上），
+            # 从 info.reward_breakdown 提取违规类型分布，量化坏循环入口。
+            if reward < 0.0:
+                self._fail_window["fail_steps"] += 1
+                rbd = _info.get("reward_breakdown", {}) or {}
+                hit = {}
+                for t in ("overlap_hard", "overlap_soft", "out_of_bounds"):
+                    v = rbd.get(t, 0.0)
+                    if v < 0.0:
+                        hit[t] = True
+                        self._fail_window["by_type"][t]["n"] += 1
+                        self._fail_window["by_type"][t]["penalty"] += abs(v)
+                if _info.get("in_keepout"):
+                    hit["in_keepout"] = True
+                    self._fail_window["by_type"]["in_keepout"]["n"] += 1
+                if hit.get("out_of_bounds") and not any(
+                    hit.get(k) for k in ("overlap_hard", "overlap_soft", "in_keepout")
+                ):
+                    self._fail_window["oob_only"] += 1
+                # 同一元件连续失败串（坏循环 = 反复重试同一元件）
+                comp_idx = transitions[0][1]  # step0 动作 = 本回合选中的元件
+                if comp_idx == self._last_fail_comp:
+                    self._consecutive_fail += 1
+                else:
+                    self._consecutive_fail = 1
+                self._last_fail_comp = comp_idx
+                self._fail_window["max_consecutive_fail"] = max(
+                    self._fail_window["max_consecutive_fail"], self._consecutive_fail
+                )
+                # 保险丝：同一元件连续失败 ≥ 阈值 → 强制终止 episode。
+                # 打断"微小惩罚反复重试"的坏循环（原靠 -150 累计惩罚掐断，
+                # 平均要 40~90 次重试，浪费训练步数并污染 buffer）。
+                if (
+                    getattr(Config, "FUSE_MAX_CONSECUTIVE_FAIL", 0) > 0
+                    and self._consecutive_fail >= Config.FUSE_MAX_CONSECUTIVE_FAIL
+                ):
+                    self._fail_window["fuse_triggered"] += 1
+                    self._consecutive_fail = 0  # 重置连败串，下一 episode 重新计数
+                    done = True
+
+            # ---- 写入 buffer（5 步按比例共享 reward，做 per-board 静态归一化） ----
+            # 静态归一化：除以完成奖励上限 W_COMPLETION，使不同板 reward 同量纲，
+            # 避免元件数差异导致跨板 reward 量纲悬殊、Q 网络目标被极端值主导。
+            # 放满全部元件 → reward=200 → 归一化后 = 1.0（所有板一致）。
             share_weights = [0.2, 0.3, 0.3, 0.1, 0.1]
+            norm_denom = float(Config.W_COMPLETION)
+            reward_norm = reward / norm_denom
             for i, (s, a, mask, sid) in enumerate(transitions):
                 if sid < 4:
                     next_s = transitions[i + 1][0]
@@ -385,7 +475,7 @@ class Runner:
                     next_sid = 0 if not done else -1
                     step_done = done
 
-                step_reward = reward * share_weights[sid]
+                step_reward = reward_norm * share_weights[sid]
                 buffer.add(s, a, step_reward, next_s, mask, step_done, sid, next_sid)
 
             # ---- 每步 learn（预热期跳过） ----
@@ -434,7 +524,18 @@ class Runner:
         # t 永远达不到 total_episodes，ε 收敛不到 EPSILON_MIN。
         n_boards = max(1, len(getattr(self, "pcb_pool", [])))
         per_board_budget = total_episodes / n_boards
-        decay_episodes = max(Config.EPSILON_DECAY_EPISODES, per_board_budget)
+        # ε 衰减修复：衰减区间直接跟随实际单板训练预算 per_board_budget，
+        # 而非被 EPSILON_DECAY_EPISODES（默认 10000）钳制。原 max() 在短训练
+        # （--total_episodes 2000）时 decay 区间恒为 10000，ε 全程 ~0.5 几乎不降，
+        # 模型始终半随机半利用，训练不收敛（各板后 20% R 均退化）。
+        # 改后 ε 在单板预算末收敛到 EPSILON_MIN：t→per_board_budget 时
+        # exp(-4)≈0.018，ε≈eps_min，训练后期充分"利用"学到的策略。
+        # 治本实验：若显式配置 EPSILON_DECAY_EPISODES(>0 且 < budget)，则用作衰减区间，
+        # 使 ε 提前降到低值（诊断发现 ep198 时 ε 仍 0.39，模型被自身随机探索破坏）。
+        decay_episodes = per_board_budget
+        cfg_decay = int(getattr(Config, "EPSILON_DECAY_EPISODES", 0) or 0)
+        if cfg_decay > 0:
+            decay_episodes = min(per_board_budget, float(cfg_decay))
         return eps_min + (eps_start - eps_min) * math.exp(-4.0 * t / decay_episodes)
 
     def _compute_curriculum_weight(self, pcb_name: str) -> float:
@@ -479,8 +580,10 @@ class Runner:
         epsilon_decompose = getattr(Config, "EXPERT_EPSILON_DECOMPOSE", 0.5)
         pos_noise_prob = getattr(Config, "EXPERT_POS_NOISE_PROB", 0.2)
         rot_noise_prob = getattr(Config, "EXPERT_ROT_NOISE_PROB", 0.1)
-        # 专家 reward 是否携带惩罚项（False=仅品质奖励；True=与 RL 真实环境一致）
-        expert_apply_penalties = bool(getattr(Config, "EXPERT_APPLY_PENALTIES", False))
+        # 雷2修复：专家 reward 携带惩罚项，与 RL 真实环境一致（默认 True）。
+        # 修复前默认 False 且 argument.txt 未定义 → 重新生成专家数据时
+        # 会产出"仅品质奖励、无惩罚"的轨迹，与训练 reward 口径不一致（实验 D 残留）。
+        expert_apply_penalties = bool(getattr(Config, "EXPERT_APPLY_PENALTIES", True))
 
         # 输出目录（相对路径 → 基于项目根目录的绝对路径）
         # 优先使用外层调度器注入的覆盖目录（对照实验隔离缓存），否则用 Config 默认值
@@ -684,6 +787,19 @@ class Runner:
         from utils.pcb_scan import find_pcb_files
         all_files = find_pcb_files(self.data_dir)
 
+        # 按 --exclude 参数排除（子串匹配，可多个用英文逗号分隔）
+        exclude_str = getattr(self.args, "exclude", None)
+        if exclude_str:
+            exclusions = [e.strip() for e in exclude_str.split(",") if e.strip()]
+            excluded = [f for f in all_files
+                        if any(e in os.path.basename(f) for e in exclusions)]
+            if excluded:
+                all_files = [f for f in all_files if f not in excluded]
+                logger.info(
+                    f"Excluded {len(excluded)}/{len(excluded) + len(all_files)} files "
+                    f"matching {exclusions}: {[os.path.basename(f) for f in excluded]}"
+                )
+
         # 按 --board 参数过滤
         board_filter = getattr(self.args, "board", None)
         if board_filter:
@@ -726,6 +842,72 @@ class Runner:
             f"ε={epsilon:.3f}  loss={loss:.4f}"
         )
 
+        # ---- 失败监控窗口输出（每 LOG_INTERVAL ep 一次，输出后清零） ----
+        fw = self._fail_window
+        if fw["fail_steps"] > 0:
+            fs = fw["fail_steps"]
+            parts = []
+            for t in ("out_of_bounds", "overlap_hard", "overlap_soft", "in_keepout"):
+                d = fw["by_type"][t]
+                parts.append(f"{t}={100.0 * d['n'] / fs:.1f}%({d['n']})")
+            logger.info(
+                f"[FAIL MONITOR] 窗口{fw['episodes']}ep 失败step={fs} "
+                f"保险丝={fw['fuse_triggered']} 纯出界="
+                f"{100.0 * fw['oob_only'] / fs:.1f}%({fw['oob_only']}) "
+                f"同元件连败最长={fw['max_consecutive_fail']} | " + " ".join(parts)
+            )
+        # 清零窗口（保留结构复用）
+        fw["episodes"] = 0
+        fw["fail_steps"] = 0
+        fw["max_consecutive_fail"] = 0
+        fw["oob_only"] = 0
+        fw["fuse_triggered"] = 0
+        for t in fw["by_type"]:
+            fw["by_type"][t]["n"] = 0
+            fw["by_type"][t]["penalty"] = 0.0
+        self._last_fail_comp = -1
+        self._consecutive_fail = 0
+
+    def _safe_move(self, src_path: str, dst: str, max_retries: int = 10):
+        """健壮地把 src 移动到 dst，对 Windows 瞬时文件锁做重试。
+
+        背景：Windows 下 `shutil.move` 跨目录时内部先 `os.rename`，若目标已存在则
+        先删目标、再 `os.unlink(src)`。当 src 被其它进程（日志查看器/杀毒扫描/
+        上次训练进程退出延迟释放句柄）瞬时占用时会抛 `PermissionError: WinError 32`，
+        导致训练启动直接中断。
+
+        本方法改用"复制 + 删除"两段式，并对 PermissionError 退避重试；重试耗尽则
+        返回（由调用方降级跳过备份，绝不中断训练）。
+
+        Args:
+            src_path: 源文件路径
+            dst: 目标文件路径
+            max_retries: 最大重试次数（默认 10，每次间隔 0.5s，共约 5s）
+        """
+        if not os.path.isfile(src_path):
+            return
+        last_err = None
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt == 0:
+                    # 首次直接尝试 move（最快路径，正常场景一步到位）
+                    shutil.move(src_path, dst)
+                else:
+                    # 之后改为复制 + 删除，对锁更宽容
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    shutil.copy2(src_path, dst)
+                    os.remove(src_path)
+                return
+            except PermissionError as e:
+                last_err = e
+                time.sleep(0.5 * (attempt + 1))  # 退避重试
+            except OSError as e:
+                # 非锁类错误直接忽略（文件不存在等），由调用方降级
+                last_err = e
+                break
+        logger.warning(f"safe_move failed for {os.path.basename(src_path)}: {last_err}")
+
     def _backup_previous_results(self):
         """训练开始前备份旧产物，每种最多保留 5 份。
 
@@ -749,8 +931,14 @@ class Runner:
                 continue
             backup_name = backup_tpl.format(ts=timestamp)
             dst = os.path.join(backup_dir, backup_name)
-            shutil.move(src_path, dst)
-            logger.info(f"Backed up: {src_name} → backup/{backup_name}")
+            self._safe_move(src_path, dst)
+            if os.path.isfile(dst):
+                logger.info(f"Backed up: {src_name} → backup/{backup_name}")
+            else:
+                # 备份失败（文件被占用且重试耗尽）：降级跳过，不中断训练
+                logger.warning(
+                    f"Backup skipped for {src_name} (file locked, retries exhausted) — 继续训练，不中断"
+                )
 
             # 按类型清理旧备份：最多保留 5 份
             prefix = backup_name.rsplit("_2", 1)[0]  # "best_model" / "training_log" / "bc_loss_history"

@@ -55,6 +55,7 @@ class ExpertTrajectoryGenerator:
         epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
         pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
         rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
+        apply_penalties: bool = True,
     ):
         """初始化生成器。
 
@@ -64,10 +65,13 @@ class ExpertTrajectoryGenerator:
             epsilon_decompose: 拆解随机化概率（50% 随机选 / 50% 选最小面积）
             pos_noise_prob: 位置变异概率（±1~2 格偏移）
             rot_noise_prob: 旋转变异概率（全 4 种旋转）
+            apply_penalties: 专家 reward 是否携带硬重叠/软间距/出界惩罚项；
+                True=与 RL 环境一致，False=仅品质奖励（对照实验用）
         """
         self.total_transitions = total_transitions
         self.max_trajectories = max_trajectories
         self.epsilon_decompose = epsilon_decompose
+        self.apply_penalties = apply_penalties
         self.pos_noise_prob = pos_noise_prob
         self.rot_noise_prob = rot_noise_prob
 
@@ -253,10 +257,15 @@ class ExpertTrajectoryGenerator:
                 return False
 
         self_pkg = snapshot[comp_id].get("package_type", 0)
+        self_layer = snapshot[comp_id].get("layer", 0)
 
         # 全局检查：遍历所有元件（含尚未放置者），跳过自身
         for other_id, other_state in snapshot.items():
             if other_id == comp_id:
+                continue
+            # 层感知修复：不同层（Top/Bottom）元件不判硬重叠。双面 PCB 中
+            # U1(Top) 与 CN3(Bottom) 可叠放，与 env._detect_collisions 一致。
+            if other_state.get("layer", 0) != self_layer:
                 continue
             other_bbox = other_state["bbox"]
             other_pkg = other_state.get("package_type", 0)
@@ -347,6 +356,13 @@ class ExpertTrajectoryGenerator:
             target_bbox = mutated["bbox"]
             target_rotation = mutated["rotation"]
             target_layer = mutated["layer"]
+
+            # 层防御校验：变异层若不在 SINGLE_LAYER/footprint 允许集内，回退原始层。
+            # 专家轨迹本就"层严格继承原始层"（_mutate_component_state 不变异层），
+            # 此处兜底防止未来放开层变异/外部数据导致的非法层。
+            comp_ref = env.movable_list[comp_idx]
+            if target_layer not in env._allowed_layers_of(comp_ref):
+                target_layer = comp_target["layer"]
 
             # 关键修复：变异产生连续坐标 bbox，而 reward/next_obs 用量化坐标。
             # 必须把目标 bbox 量化对齐到网格，否则 ±0.1mm 量化误差会在软间距
@@ -488,7 +504,11 @@ class ExpertTrajectoryGenerator:
                 next_sid = 0 if not done else -1
                 step_done = done
 
-            step_reward = expert_reward * share_weights[i]
+            # 雷1修复：专家 reward 与 RL 普通经验同口径归一化（÷W_COMPLETION）。
+            # 修复前专家样本(≈3.88=19.4×0.2)与 RL 普通样本(≈0.039=1.96/100×0.2)
+            # 量纲差 100 倍，Phase 2 每 batch 混采时 Q 的 MSE 目标尺度矛盾，训练震荡。
+            # 修复后专家/普通样本 reward 统一到 [0,~2] 量级。
+            step_reward = expert_reward / Config.W_COMPLETION * share_weights[i]
             transitions.append((
                 self._copy_obs(obs_list[i]),
                 actions[i],
@@ -543,6 +563,7 @@ class ExpertTrajectoryGenerator:
                 total_out_of_bounds,
                 has_violations,
                 quality_scale=1.0,
+                apply_penalties=self.apply_penalties,
             )
         finally:
             comp.bbox, comp.rotation, comp.layer = saved
@@ -843,6 +864,7 @@ def generate_and_save_expert_transitions(
     epsilon_decompose: float = DEFAULT_EPSILON_DECOMPOSE,
     pos_noise_prob: float = DEFAULT_POS_NOISE_PROB,
     rot_noise_prob: float = DEFAULT_ROT_NOISE_PROB,
+    apply_penalties: bool = True,
 ) -> Tuple[List[Tuple], str]:
     """便捷函数：生成并保存一块 PCB 的专家 transition。
 
@@ -855,6 +877,7 @@ def generate_and_save_expert_transitions(
         epsilon_decompose: 拆解随机化概率
         pos_noise_prob: 位置变异概率
         rot_noise_prob: 旋转变异概率
+        apply_penalties: 专家 reward 是否携带惩罚项（透传给生成器）
 
     Returns:
         (transitions, filepath) 元组
@@ -865,6 +888,7 @@ def generate_and_save_expert_transitions(
         epsilon_decompose=epsilon_decompose,
         pos_noise_prob=pos_noise_prob,
         rot_noise_prob=rot_noise_prob,
+        apply_penalties=apply_penalties,
     )
 
     transitions = generator.generate_all_expert_transitions(env, pcb_name)
