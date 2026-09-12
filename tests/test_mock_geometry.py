@@ -125,24 +125,35 @@ def test_pin_abs_positions_rotation180_270():
 
 
 def test_pin_abs_positions_real_component():
-    """真实 Component 用预计算偏移：绝对坐标随旋转同步。"""
+    """真实 Component 用预计算偏移：绝对坐标随【层 + 旋转】同步。"""
     comp = RealComponent(
         id="U1", footprint="QFP-44", package_type=2,
         bbox=(10, 20, 20, 30), rotation=1, layer=0,
         is_fixed=False, is_placed=False,
         pins=[("1", 0, 5), ("44", 10, 5)],
         source_rotation=0, source_bbox=(0, 0, 10, 10),
-        pin_offsets_by_rotation={
-            0: [(-5.0, 0.0), (5.0, 0.0)],
-            1: [(0.0, 5.0), (0.0, -5.0)],
-            2: [(5.0, 0.0), (-5.0, 0.0)],
-            3: [(0.0, -5.0), (0.0, 5.0)],
+        pin_offsets_by_pose={
+            (0, 0): [(-5.0, 0.0), (5.0, 0.0)],
+            (0, 1): [(0.0, 5.0), (0.0, -5.0)],
+            (0, 2): [(5.0, 0.0), (-5.0, 0.0)],
+            (0, 3): [(0.0, -5.0), (0.0, 5.0)],
+            # 背面：局部镜像后同角度下与正面不同（这里给一组可区分的值）
+            (1, 0): [(-5.0, 0.0), (5.0, 0.0)],
+            (1, 1): [(0.0, -5.0), (0.0, 5.0)],
+            (1, 2): [(5.0, 0.0), (-5.0, 0.0)],
+            (1, 3): [(0.0, 5.0), (0.0, -5.0)],
         },
     )
     # bbox (10,20,20,30) 中心 (15,25)，当前 rotation=1
     assert comp.pin_abs_positions() == [("1", 15.0, 30.0), ("44", 15.0, 20.0)]
     # 指定 rotation=3 → 垂直翻转
     assert comp.pin_abs_positions(3) == [("1", 15.0, 20.0), ("44", 15.0, 30.0)]
+    # 同一 rotation 下换层必须换一组偏移（旧实现只看 rotation，这里会返回正面值）
+    assert comp.pin_abs_positions(1, layer=1) == [("1", 15.0, 20.0), ("44", 15.0, 30.0)]
+    assert comp.pin_abs_positions(1, layer=1) != comp.pin_abs_positions(1, layer=0)
+    # layer 省略时取 self.layer
+    comp.layer = 1
+    assert comp.pin_abs_positions(1) == [("1", 15.0, 20.0), ("44", 15.0, 30.0)]
 
 
 # ==================== 3. env.step 精确 bbox ====================

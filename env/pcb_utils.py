@@ -212,8 +212,9 @@ class PCBUtils:
         cap_cx, cap_cy = cap.center
 
         # 收集 IC 所有引脚的绝对坐标。
-        # 必须用 ic.pin_abs_positions()（相对当前 bbox 中心 + 该旋转的预计算偏移），
-        # 不能用 bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
+        # 必须用 ic.pin_abs_positions()（相对当前 bbox 中心 + 该【层+旋转】的预计算
+        # 偏移），不能用 bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真；
+        # 元件在背面时正/背面引脚布局还不同，只看旋转也会算错。
         # TODO: 待 kicad_utils 支持 pin→net 映射后，改为仅过滤电源网络引脚
         pin_abs_positions = [(abs_x, abs_y)
                              for _pin_num, abs_x, abs_y in ic.pin_abs_positions()]

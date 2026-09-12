@@ -61,7 +61,8 @@ class Component:
     footprint_h: float                               # 源姿态下的 AABB 高度 mm
     source_rotation: int                             # 源文件中的旋转（0-3），footprint_w/h 的测量姿态
     source_bbox: Tuple[float, float, float, float]   # 源姿态 AABB（导入时），与 footprint_w/h 一致（不可变）
-    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]]  # r∈0..3 各 pad 相对该旋转 bbox 中心的偏移
+    pin_offsets_by_pose: Dict[Tuple[int, int], List[Tuple[float, float]]]  # (layer, r) 各 pad 相对该姿
+                                                                          # 态 bbox 中心的偏移
 
     @property
     def footprint_area(self) -> float:
@@ -81,12 +82,15 @@ class Component:
             return self.footprint_w, self.footprint_h
         return self.footprint_h, self.footprint_w
 
-    def pin_abs_positions(self, rotation: Optional[int] = None) -> List[Tuple[str, float, float]]:
-        """指定（或当前）旋转下各引脚的绝对坐标：bbox 中心 + 该旋转预计算偏移。"""
+    def pin_abs_positions(self, rotation: Optional[int] = None,
+                          layer: Optional[int] = None) -> List[Tuple[str, float, float]]:
+        """指定（或当前）【层 + 旋转】下各引脚的绝对坐标：bbox 中心 + 该姿态预计算偏移。"""
         if rotation is None:
             rotation = self.rotation
+        if layer is None:
+            layer = self.layer
         cx, cy = self.center
-        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        offsets = self.pin_offsets_by_pose.get((layer, rotation % 4), [])
         return [(num, cx + ox, cy + oy)
                 for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)]
 ```
@@ -108,10 +112,12 @@ class Component:
 | `footprint_w` | `float` | `pcbnew.ToMM(hull.GetWidth())` | 源姿态 AABB 宽度（非 0° 尺寸） |
 | `footprint_h` | `float` | `pcbnew.ToMM(hull.GetHeight())` | 源姿态 AABB 高度 |
 | `source_rotation` | `int` | `fp.GetOrientationDegrees() // 90 % 4` | footprint_w/h 的测量姿态 |
-| `pin_offsets_by_rotation` | `dict` | 旋转 footprint 后读 `pad.GetPosition() - hull 中心` | 预计算 4 旋转 pad 偏移 |
+| `pin_offsets_by_pose` | `dict` | 切面+旋转 footprint 后读 `pad.GetPosition() - hull 中心` | 预计算 2 层 x 4 角 = 8 个姿态的 pad 偏移 |
 
 **关键约束**：
-- `pins` 坐标是**相对源姿态 bbox 左上角**的偏移（源姿态 = 源文件当前旋转），旋转后必须用 `pin_abs_positions(rotation)` 取绝对坐标，**不要用 `bbox[0] + rel_x`**——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
+- `pins` 坐标是**相对源姿态 bbox 左上角**的偏移（源姿态 = 源文件当前旋转），旋转或换面后必须用 `pin_abs_positions(rotation, layer)` 取绝对坐标，**不要用 `bbox[0] + rel_x`**——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
+- `pin_offsets_by_pose` 必须按 **(layer, rotation) 双键**查。面镜像不是"同角度下左右镜像"，而是在**局部未旋转坐标系**里镜像后再旋转：合成非对称 3 pad 实测 TOP rot=0 `(-2.00,-1.50)` → BOT rot=0 `(-2.00,+1.50)`（Y 变号），TOP rot=90 `(-1.50,+2.00)` → BOT rot=90 `(+1.50,+2.00)`（X 变号）。只按旋转查表会在底面算错引脚（该样本错 3mm），进而污染网表聚合 / 去耦距离 / 专家特征。
+- 预计算切面一律用 `fp.Flip(fp.GetPosition(), FLIP_DIRECTION_TOP_BOTTOM)`，**不能用 `SetLayer`**：后者只改父层，不动 pad 子层与几何，量出来的偏移与正面完全一样（等于没切面）。恢复也用 `Flip` + 写绝对角 + `SetPosition`，顺序不能反（`Flip` 会改写角度）。
 - `footprint_w` / `footprint_h` 是**源姿态**下的 AABB 尺寸（`GetBoundingHull().BBox()`，含源文件旋转），不是 0° 原始尺寸。目标旋转下的宽高须用 `dims_at_rotation(target_rotation)`：相对 `source_rotation` 的 delta 为奇数（90°/270°）时宽高交换。
 - `bbox` 是源姿态 AABB，是**不可变快照**；RL 放置后应更新 `bbox` 为当前坐标，但 `footprint_w/h` / `source_bbox` 保持源姿态不变。
 - `nets` 字段在 `_cache_components()` 中初始为空列表，由 `_cache_nets()` 回填。
@@ -313,7 +319,7 @@ load_board(pcb_path)
   │     ├─ pcbnew.LayerName(fp.GetLayer()) → Component.layer
   │     ├─ fp.IsLocked()                  → Component.is_fixed
   │     ├─ fp.Pads()                      → Component.pins（相对源姿态 bbox 左上角）
-  │     └─ 4 旋转 mutate+restore 预计算    → Component.pin_offsets_by_rotation
+  │     └─ 2 层 x 4 角 mutate(Flip)+restore → Component.pin_offsets_by_pose
   │
   ├─ _cache_nets()
   │     ├─ board.GetNetsByName().values() → 遍历所有网络

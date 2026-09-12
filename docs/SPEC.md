@@ -71,7 +71,7 @@ class Component:
     footprint_h: float                   # 源姿态下的 AABB 高度 mm
     source_rotation: int                 # 源文件中的旋转（0-3），footprint_w/h 的测量姿态
     source_bbox: Tuple[float, float, float, float]  # 源姿态 AABB（导入时，不可变）
-    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]]  # r∈0..3 各 pad 相对该旋转 bbox 中心的偏移
+    pin_offsets_by_pose: Dict[Tuple[int, int], List[Tuple[float, float]]]  # (layer, r) 各 pad 相对该姿态 bbox 中心的偏移
 
     @property
     def footprint_area(self) -> float:
@@ -91,12 +91,19 @@ class Component:
             return self.footprint_w, self.footprint_h
         return self.footprint_h, self.footprint_w
 
-    def pin_abs_positions(self, rotation: int = None) -> List[Tuple[str, float, float]]:
-        """指定（或当前）旋转下各引脚的绝对坐标：bbox 中心 + 预计算偏移。"""
+    def pin_abs_positions(self, rotation: int = None,
+                          layer: int = None) -> List[Tuple[str, float, float]]:
+        """指定（或当前）【层 + 旋转】下各引脚的绝对坐标：bbox 中心 + 预计算偏移。
+
+        必须按 (layer, rotation) 双键查：面镜像不是"同角度下左右镜像"，
+        而是在局部未旋转坐标系里镜像后再旋转，只按旋转查表会在底面算错。
+        """
         if rotation is None:
             rotation = self.rotation
+        if layer is None:
+            layer = self.layer
         cx, cy = self.center
-        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        offsets = self.pin_offsets_by_pose.get((layer, rotation % 4), [])
         return [(num, cx + ox, cy + oy)
                 for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)]
 ```

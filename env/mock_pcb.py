@@ -17,6 +17,21 @@ logger = logging.getLogger(__name__)
 
 # ==================== 模型层 — Mock 数据结构 ====================
 
+def _rot90(dx: float, dy: float, quarter: int) -> Tuple[float, float]:
+    """把 (dx, dy) 绕原点旋转 quarter 个 90°（KiCad 约定：视觉逆时针，Y 轴向下）。
+
+    quarter 可为负（-1 ≡ 3），用于求逆变换 R(-θ) = R(3θ)。
+    """
+    q = quarter % 4
+    if q == 0:
+        return dx, dy
+    if q == 1:
+        return dy, -dx
+    if q == 2:
+        return -dx, -dy
+    return -dy, dx
+
+
 @dataclass
 class MockComponent:
     """最小化 Component mock，属性集与 kicad_utils.Component 兼容。"""
@@ -37,8 +52,18 @@ class MockComponent:
     footprint_h: float = 0.0
     source_rotation: int = 0
     source_bbox: Tuple[float, float, float, float] = field(default_factory=tuple)
-    # 惰性构建：第一次访问 pin_abs_positions 时按 rotation 矩阵计算
-    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]] = field(default_factory=dict)
+    source_layer: Optional[int] = None
+    # source_layer: 导入时所在的层（0=TOP, 1=BOTTOM）。None → 取构造时的 layer。
+    #   与环境动作改写的 layer 不同：层镜像的判定必须拿源层做基准，
+    #   env 把元件挪到背面后 self.layer 已不是源层。
+    # 惰性构建：第一次访问 pin_abs_positions 时按 (layer, rotation) 矩阵计算
+    pin_offsets_by_pose: Dict[Tuple[int, int], List[Tuple[float, float]]] = \
+        field(default_factory=dict)
+
+    def __post_init__(self):
+        # 构造即源姿态：此处捕获的 layer 就是源层（之后 env 才会改 self.layer）
+        if self.source_layer is None:
+            self.source_layer = self.layer
 
     @property
     def footprint_area(self) -> float:
@@ -58,43 +83,56 @@ class MockComponent:
             return self.footprint_w, self.footprint_h
         return self.footprint_h, self.footprint_w
 
-    def _build_pin_offsets_by_rotation(self) -> Dict[int, List[Tuple[float, float]]]:
-        """由 pins（相对源 bbox 左上角）按旋转矩阵生成 4 旋转的相对偏移。
+    def _build_pin_offsets_by_pose(
+            self) -> Dict[Tuple[int, int], List[Tuple[float, float]]]:
+        """由 pins（相对源 bbox 左上角）解析生成 8 个姿态的相对偏移。
 
-        与真实 KiCad 的旋转约定一致（+90°：视觉逆时针，Y 轴向下）。
-        rotation=0 时退化为旧公式 bbox[0]+rel_x，保证既有测试兼容。
+        与真实 KiCad 的约定一致（+90°：视觉逆时针，Y 轴向下）。规则三步：
+          1) 把源偏移还原到【局部未旋转坐标系】：l = R(-source_rotation)·(dx, dy)
+          2) 目标层与源层不同时，在局部坐标系里镜像：ly = -ly
+          3) 再旋转到目标角：offset = R(rotation)·l
+
+        为什么不是"同角度下左右镜像"：实测非对称封装 rot=0 时正面→背面
+        Y 变号、rot=90 时正面→背面 X 变号 —— 镜像发生在旋转【之前】。
+        任何单角度镜像公式都会在某个角度给出错误引脚坐标，
+        故这里按"局部镜像 + 再旋转"合成，与真实 KiCad 逐姿态实测的表同构。
+
+        同层且 rotation=0 时退化为旧公式 bbox[0]+rel_x，兼容既有测试。
         """
         src_w = self.source_bbox[2] - self.source_bbox[0] if self.source_bbox else \
             (self.bbox[2] - self.bbox[0])
         src_h = self.source_bbox[3] - self.source_bbox[1] if self.source_bbox else \
             (self.bbox[3] - self.bbox[1])
-        result: Dict[int, List[Tuple[float, float]]] = {}
-        for r in range(4):
-            delta = (r - self.source_rotation) % 4
-            offsets = []
-            for _num, rel_x, rel_y in self.pins:
-                dx = rel_x - src_w / 2.0   # 源姿态下相对 bbox 中心的偏移
-                dy = rel_y - src_h / 2.0
-                if delta == 0:
-                    ox, oy = dx, dy
-                elif delta == 1:
-                    ox, oy = dy, -dx
-                elif delta == 2:
-                    ox, oy = -dx, -dy
-                else:
-                    ox, oy = -dy, dx
-                offsets.append((ox, oy))
-            result[r] = offsets
+        src_lay = self.source_layer if self.source_layer is not None else 0
+        result: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+        for lay in (0, 1):
+            flip = (lay != src_lay)
+            for r in range(4):
+                offsets = []
+                for _num, rel_x, rel_y in self.pins:
+                    # 源姿态下相对 bbox 中心的偏移
+                    dx = rel_x - src_w / 2.0
+                    dy = rel_y - src_h / 2.0
+                    lx, ly = _rot90(dx, dy, -self.source_rotation)   # 回到局部坐标系
+                    if flip:
+                        ly = -ly                                    # 局部镜像
+                    offsets.append(_rot90(lx, ly, r))                # 转到目标角
+                result[(lay, r)] = offsets
         return result
 
-    def pin_abs_positions(self, rotation: Optional[int] = None) -> List[Tuple[str, float, float]]:
-        """返回指定（或当前）旋转下各引脚的绝对坐标（与真实 Component 同接口）。"""
+    def pin_abs_positions(self, rotation: Optional[int] = None,
+                          layer: Optional[int] = None) -> List[Tuple[str, float, float]]:
+        """返回指定（或当前）【层 + 旋转】下各引脚的绝对坐标（与真实 Component 同接口）。"""
         if rotation is None:
             rotation = self.rotation
-        if not self.pin_offsets_by_rotation:
-            self.pin_offsets_by_rotation = self._build_pin_offsets_by_rotation()
+        if layer is None:
+            layer = self.layer
+        if layer not in (0, 1):
+            layer = 0
+        if not self.pin_offsets_by_pose:
+            self.pin_offsets_by_pose = self._build_pin_offsets_by_pose()
         cx, cy = self.center
-        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        offsets = self.pin_offsets_by_pose.get((layer, rotation % 4), [])
         return [
             (num, cx + ox, cy + oy)
             for (num, _rx, _ry), (ox, oy) in zip(self.pins, offsets)

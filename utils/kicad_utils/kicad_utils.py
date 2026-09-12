@@ -86,9 +86,18 @@ class Component:
     source_rotation: int = 0                         # 源文件中的旋转（0-3），footprint_w/h 的测量姿态
     source_bbox: Tuple[float, float, float, float] = field(default_factory=tuple)
     # source_bbox: 源姿态 AABB（导入时），与 footprint_w/h 一致（不可变）
-    pin_offsets_by_rotation: Dict[int, List[Tuple[float, float]]] = field(default_factory=dict)
-    # pin_offsets_by_rotation[r]: [(ox, oy), ...] 旋转 r 下各 pad 相对该旋转 bbox 中心的偏移 (mm)
-    #   顺序与 pins 一致；由 _cache_components 用真实 KiCad 几何预计算（含旋转）
+    pin_offsets_by_pose: Dict[Tuple[int, int], List[Tuple[float, float]]] = \
+        field(default_factory=dict)
+    # pin_offsets_by_pose[(layer, rotation)]: [(ox, oy), ...]
+    #   该层该角度下各 pad 相对【该姿态 bbox 中心】的偏移 (mm)，顺序与 pins 一致。
+    #   由 _cache_components 用真实 KiCad 几何逐姿态实测（2 层 x 4 角 = 8 个）。
+    #
+    # 为什么必须带 layer（P0 级）：跨面不是"同角度下左右镜像"。实测非对称封装
+    # rot=0 时正面 (+0.5,+1.5) -> 背面 (+0.5,-1.5)（Y 变号），
+    # rot=90 时正面 (+1.5,-0.5) -> 背面 (-1.5,-0.5)（X 变号）——
+    # 即在【局部未旋转坐标系】里镜像后再旋转。任何单一镜像公式都会在某个角度错，
+    # 所以只能逐姿态实测。旧的 4 姿态表只测源面那一侧，元件移到对面后
+    # pin_abs_positions() 返回的是镜像前的坐标，底面引脚全错。
 
     @property
     def footprint_area(self) -> float:
@@ -113,22 +122,30 @@ class Component:
             return self.footprint_w, self.footprint_h
         return self.footprint_h, self.footprint_w
 
-    def pin_abs_positions(self, rotation: Optional[int] = None) -> List[Tuple[str, float, float]]:
-        """返回指定（或当前）旋转下各引脚的绝对坐标。
+    def pin_abs_positions(self, rotation: Optional[int] = None,
+                          layer: Optional[int] = None) -> List[Tuple[str, float, float]]:
+        """返回指定（或当前）【层 + 旋转】下各引脚的绝对坐标。
 
-        绝对位置 = 当前 bbox 中心 + 该旋转预计算的 pad 偏移。
-        引脚随旋转同步更新，与 KiCad 真实几何一致。
+        绝对位置 = 当前 bbox 中心 + 该姿态预计算的 pad 偏移。
+        姿态由 (layer, rotation) 共同决定 —— 只按旋转查表是错的：
+        同一旋转角下正面与背面的 pad 布局不同（面镜像），元件被移到背面后
+        按正面偏移算出来的引脚坐标是镜像前的，网表聚合/去耦距离/专家特征全错。
 
         Args:
             rotation: 目标旋转（0-3），默认使用 self.rotation
+            layer:    目标层（0=TOP, 1=BOTTOM），默认使用 self.layer
 
         Returns:
             [(pin_number, abs_x, abs_y), ...]，与 pins 顺序一致
         """
         if rotation is None:
             rotation = self.rotation
+        if layer is None:
+            layer = self.layer
+        if layer not in (0, 1):
+            layer = 0
         cx, cy = self.center
-        offsets = self.pin_offsets_by_rotation.get(rotation, [])
+        offsets = self.pin_offsets_by_pose.get((layer, rotation % 4), [])
         return [
             (num, cx + ox, cy + oy)
             for (num, _rel_x, _rel_y), (ox, oy) in zip(self.pins, offsets)
@@ -370,32 +387,45 @@ class KiCadUtils:
                 rel_y = pad_pos_mm[1] - bbox_mm[1]
                 pins.append((pad.GetNumber(), rel_x, rel_y))
 
-            # 预计算 4 个旋转下各 pad 相对该旋转 bbox 中心的偏移（真实 KiCad 几何）。
-            # 方法：临时设置 footprint 旋转 → 读 hull bbox 中心与 pad 世界坐标
+            # 预计算 8 个姿态（2 层 x 4 角）下各 pad 相对该姿态 bbox 中心的偏移
+            # （真实 KiCad 几何，不靠任何解析公式）。
+            # 方法：切面 → 写绝对角 → 读 hull bbox 中心与 pad 世界坐标
             #       （PAD::GetPosition() 随父 footprint 变换更新）→ 计算偏移 →
-            #       finally 恢复源姿态。源姿态的 bbox/旋转在恢复后不变。
-            pin_offsets_by_rotation = {}
+            #       finally 恢复源姿态。
+            #
+            # 为什么必须含背面：面镜像不是"同角度下左右镜像"，而是在【局部未旋转
+            # 坐标系】里镜像后再旋转。实测非对称封装 rot=0 正→背 Y 变号、
+            # rot=90 正→背 X 变号。旧的 4 姿态表只测了源面，元件移到对面后
+            # 查表拿到的还是镜像前的偏移，底面引脚坐标全错。
+            #
+            # 切面一律用 Flip：SetLayer 只改父层，不动 pad 子层与几何，
+            # 用量出来的偏移会跟正面的完全一样（等于没切面）。
+            pin_offsets_by_pose: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
             _saved_rot = fp.GetOrientationDegrees()
             _saved_pos = fp.GetPosition()
             _saved_flipped = bool(fp.IsFlipped())
             try:
-                for r in range(4):
-                    fp.SetOrientationDegrees(float(r * 90))
-                    h = fp.GetBoundingHull().BBox()
-                    # Y 轴向下，GetBottom() > GetTop()；中心取两者中值即可
-                    hcx_nm = (h.GetLeft() + h.GetRight()) / 2.0
-                    hcy_nm = (h.GetTop() + h.GetBottom()) / 2.0
-                    offsets = []
-                    for pad in fp.Pads():
-                        p = pad.GetPosition()
-                        offsets.append((pcbnew.ToMM(p.x - hcx_nm),
-                                        pcbnew.ToMM(p.y - hcy_nm)))
-                    pin_offsets_by_rotation[r] = offsets
+                for lay in (0, 1):
+                    if bool(fp.IsFlipped()) != (lay == 1):
+                        # 以自身位置为镜像轴翻面 → 位置不变，只翻面
+                        fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+                    for r in range(4):
+                        # 翻面会改写角度，故每次都必须写【绝对角】而不是累加
+                        fp.SetOrientationDegrees(float(r * 90))
+                        h = fp.GetBoundingHull().BBox()
+                        # Y 轴向下，GetBottom() > GetTop()；中心取两者中值即可
+                        hcx_nm = (h.GetLeft() + h.GetRight()) / 2.0
+                        hcy_nm = (h.GetTop() + h.GetBottom()) / 2.0
+                        offsets = []
+                        for pad in fp.Pads():
+                            p = pad.GetPosition()
+                            offsets.append((pcbnew.ToMM(p.x - hcx_nm),
+                                            pcbnew.ToMM(p.y - hcy_nm)))
+                        pin_offsets_by_pose[(lay, r)] = offsets
             finally:
                 # 恢复必须用 Flip，不能再用 SetLayer：SetLayer 只改父层，撤销不了
-                # Flip 对 pad 子层与几何做的镜像。本循环目前只改旋转，故这是 no-op；
-                # 但只要循环内出现 Flip（预计算底面姿态时必然出现），用 SetLayer
-                # 恢复就会静默污染 self.board / self.footprints 缓存
+                # Flip 对 pad 子层与几何做的镜像。本循环现在会真的翻面，用
+                # SetLayer 恢复就会静默污染 self.board / self.footprints 缓存
                 # （反向对照实测：污染症状为 "pad 子层被污染"）。
                 # 顺序：先复原面，再写绝对角与位置（Flip 会改写这两者）。
                 if bool(fp.IsFlipped()) != _saved_flipped:
@@ -418,7 +448,7 @@ class KiCadUtils:
                 footprint_h=fp_h,
                 source_rotation=rotation,
                 source_bbox=bbox_mm,
-                pin_offsets_by_rotation=pin_offsets_by_rotation,
+                pin_offsets_by_pose=pin_offsets_by_pose,
             )
 
     @staticmethod
