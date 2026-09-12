@@ -336,7 +336,7 @@ class KiCadUtils:
             pin_offsets_by_rotation = {}
             _saved_rot = fp.GetOrientationDegrees()
             _saved_pos = fp.GetPosition()
-            _saved_layer = fp.GetLayer()
+            _saved_flipped = bool(fp.IsFlipped())
             try:
                 for r in range(4):
                     fp.SetOrientationDegrees(float(r * 90))
@@ -351,9 +351,16 @@ class KiCadUtils:
                                         pcbnew.ToMM(p.y - hcy_nm)))
                     pin_offsets_by_rotation[r] = offsets
             finally:
+                # 恢复必须用 Flip，不能再用 SetLayer：SetLayer 只改父层，撤销不了
+                # Flip 对 pad 子层与几何做的镜像。本循环目前只改旋转，故这是 no-op；
+                # 但只要循环内出现 Flip（预计算底面姿态时必然出现），用 SetLayer
+                # 恢复就会静默污染 self.board / self.footprints 缓存
+                # （反向对照实测：污染症状为 "pad 子层被污染"）。
+                # 顺序：先复原面，再写绝对角与位置（Flip 会改写这两者）。
+                if bool(fp.IsFlipped()) != _saved_flipped:
+                    fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
                 fp.SetOrientationDegrees(_saved_rot)
                 fp.SetPosition(_saved_pos)
-                fp.SetLayer(_saved_layer)
 
             self.components[reference] = Component(
                 id=reference,
@@ -601,11 +608,30 @@ class KiCadUtils:
                 cx = (comp.bbox[0] + comp.bbox[2]) / 2.0
                 cy = (comp.bbox[1] + comp.bbox[3]) / 2.0
 
-                # ③ 位置写入：实测偏移反推参考点（非对称封装不产生系统偏移）
-                # 先定旋转 → 量该姿态下 bbox 中心相对参考点偏移 → 反推 SetPosition
+                # ③ 先定面：跨面必须用 Flip()，绝不能用 SetLayer()。
+                # SetLayer 只改 footprint 父对象层，pad/钢网/阻焊/丝印/Fab/CrtYd
+                # 全部留在原面，导出结构不一致的 footprint（实测 KiCad 10.0.4：
+                # SetLayer(B.Cu) 后 IsFlipped()==True 但 pad 仍在 F.Cu）。
+                # Flip() 同时完成：父层 + pad 子层(F/B.Paste/Mask) + 丝印/Fab/CrtYd
+                # + 内部几何镜像 + 焊盘坐标 + 文本镜像 + 3D 模型正反面。
+                # 关于方向：实测 TOP_BOTTOM 与 LEFT_RIGHT 仅在「中间态存储角」上
+                # 差 180°，随后 SetOrientationDegrees 写绝对角即抹平，两者产出的
+                # 存盘角度与 pad 坐标逐位一致（见 verification_output/
+                # verify_flip_direction_equivalence.py [2]），故方向选择不影响结果。
+                want_bottom = (comp.layer == 1)
+                if bool(fp.IsFlipped()) != want_bottom:
+                    # 以自身位置为镜像中心 → 位置不变；否则位置会被镜像
+                    fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+
+                # ④ 翻面之后才写最终绝对角度（顺序不可换：Flip 会改写角度）
+                fp.SetOrientationDegrees(float(comp.rotation * 90))
+
+                # ⑤ 位置写入：实测偏移反推参考点（非对称封装不产生系统偏移）
+                # 必须在 Flip + SetOrientationDegrees 之后重新量：实测非对称封装
+                # rot=0 时 hull 中心相对锚点由 (+0.5,+1.5) 变为 (+0.5,-1.5)，
+                # rot=90 由 (+1.5,-0.5) 变为 (-1.5,-0.5)。翻面前算的偏移会错位。
                 # 注意：GetBoundingBox() 是缓存，SetOrientationDegrees 后不刷新；
                 #       必须用 GetBoundingHull().BBox()（实时反映旋转后的真实几何）
-                fp.SetOrientationDegrees(float(comp.rotation * 90))
                 bbox = fp.GetBoundingHull().BBox()
                 pos = fp.GetPosition()
                 off_x = (bbox.GetLeft() + bbox.GetRight()) / 2 - pos.x
@@ -614,10 +640,6 @@ class KiCadUtils:
                     pcbnew.FromMM(cx) - round(off_x),
                     pcbnew.FromMM(cy) - round(off_y),
                 ))
-
-                # 层
-                layer_name = "F.Cu" if comp.layer == 0 else "B.Cu"
-                fp.SetLayer(board.GetLayerID(layer_name))
 
             board.Save(output_path)
             print(f"[OK] Layout exported: {output_path}")

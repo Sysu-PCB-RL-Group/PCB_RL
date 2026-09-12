@@ -374,12 +374,15 @@ export_layout(output_path, components, template_path)
   ├─ 2. 遍历 components 中的每个元件
   │     ├─ 跳过固定元件（is_fixed == True）→ 保持原位置不变
   │     └─ 对可移动元件执行写入：
-  │         ├─ AABB → center → pcbnew.VECTOR2I(FromMM(cx), FromMM(cy))
-  │         │   → fp.SetPosition(center_nm)
-  │         ├─ rotation × 90 → degrees
-  │         │   → fp.SetOrientationDegrees(degrees)
-  │         └─ layer (0→F.Cu, 1→B.Cu)
-  │             → board.GetLayerID(layer_name) → fp.SetLayer(layer_id)
+  │         ├─ ① 先定面：跨面必须 fp.Flip(fp.GetPosition(), FLIP_DIRECTION_TOP_BOTTOM)
+  │         │      （绝不能用 SetLayer —— 见 4.5「跨面导出的陷阱」）
+  │         ├─ ② rotation × 90 → degrees
+  │         │      → fp.SetOrientationDegrees(degrees)   ← 必须在 Flip 之后
+  │         ├─ ③ 量 Flip+旋转后的真实 hull：
+  │         │      fp.GetBoundingHull().BBox() → 反推锚点
+  │         │      → pcbnew.VECTOR2I(FromMM(cx) - off_x, FromMM(cy) - off_y)
+  │         │      → fp.SetPosition(...)                  ← 必须在 Flip 之后
+  │         └─ （不再有 SetLayer 调用）
   │
   ├─ 3. board.Save(output_path)
   │
@@ -390,10 +393,38 @@ export_layout(output_path, components, template_path)
 
 | RL 字段 | RL 值 | 转换 | KiCad API | KiCad 值 |
 |---------|-------|------|-----------|---------|
-| `bbox` | `(x1,y1,x2,y2)` mm | `cx=(x1+x2)/2, cy=(y1+y2)/2` | `fp.SetPosition(VECTOR2I(FromMM(cx), FromMM(cy)))` | 中心点 (nm) |
-| `rotation` | `0/1/2/3` | `deg = rotation * 90` | `fp.SetOrientationDegrees(deg)` | 度数 (0/90/180/270) |
-| `layer` | `0` (TOP) | `"F.Cu"` | `fp.SetLayer(board.GetLayerID("F.Cu"))` | F.Cu 层 ID |
-| `layer` | `1` (BOTTOM) | `"B.Cu"` | `fp.SetLayer(board.GetLayerID("B.Cu"))` | B.Cu 层 ID |
+| `bbox` | `(x1,y1,x2,y2)` mm | `cx=(x1+x2)/2, cy=(y1+y2)/2` | 先 `GetBoundingHull().BBox()` 量偏移，再 `fp.SetPosition(VECTOR2I(FromMM(cx)-off_x, FromMM(cy)-off_y))` | 中心点 (nm) |
+| `rotation` | `0/1/2/3` | `deg = rotation * 90` | `fp.SetOrientationDegrees(deg)`（须在 Flip 之后） | 度数 (0/90/180/270) |
+| `layer` | `0` (TOP) | 目标面 = 顶面 | `fp.Flip(fp.GetPosition(), FLIP_DIRECTION_TOP_BOTTOM)`，仅当 `fp.IsFlipped()` 为真时才调用 | 父层 + pad 子层 + 图形一起到 F.Cu |
+| `layer` | `1` (BOTTOM) | 目标面 = 底面 | 同上，仅当 `fp.IsFlipped()` 为假时才调用 | 父层 + pad 子层 + 图形一起到 B.Cu |
+
+**写入顺序不可交换**：`Flip` 会改写角度，也会改变 hull 中心相对锚点的偏移，
+所以 `SetOrientationDegrees` 与位置反推都必须在 `Flip` 之后。
+
+### 4.5 跨面导出的陷阱（P0，已在 KiCad 10.0.4 实测确认）
+
+**`SetLayer()` 不是换面，它只改 footprint 父对象层。** 实测：
+
+```
+fp.SetLayer(pcbnew.B_Cu)
+→ footprint layer = B.Cu,  IsFlipped() == True     ← 看起来对了
+→ pad layers      = F.Cu, F.Paste, F.Mask          ← 焊盘仍在顶面
+→ graphics        = F.SilkS, F.Fab, F.CrtYd        ← 图形仍在顶面
+```
+
+`IsFlipped()` 只看父层，**因此只查 `GetLayer()` / `IsFlipped()` 无法发现这个问题**。
+交给生产会出现：底面没有焊盘和钢网开口、顶面出现无元件的焊盘与丝印、
+贴片坐标与 Gerber 层含义不一致。
+
+必须用 `Flip()`：它同时完成父层、pad 子层(F/B.Cu/Mask/Paste)、丝印/Fab/CrtYd、
+内部几何镜像、焊盘坐标、文本镜像、3D 模型正反面。
+
+关于 `FLIP_DIRECTION_TOP_BOTTOM` 与 `LEFT_RIGHT` 的选择：实测两者仅在
+「中间态存储角」上差 180°，随后写绝对角即被抹平；按上述顺序调用时，
+两者产出的存盘角度与 pad 坐标**逐位一致**，故方向选择不影响结果。
+
+回归测试：`tests/kicad/test_layer_flip.py`（4 用例：F→B 子层、8 姿态、
+F→B→F 复原、`SetLayer` 负向对照）。
 
 ### 4.4 footprint 匹配
 
@@ -434,9 +465,9 @@ for fp in board.Footprints():
     ├─ is_fixed? ──── yes ──▶ 跳过
     │
     └─ no:
-        ├─ bbox → center → SetPosition()
+        ├─ layer → Flip() 判定/执行（先定面）
         ├─ rotation → SetOrientationDegrees()
-        └─ layer → SetLayer()
+        └─ bbox → center → 量 hull 偏移 → SetPosition()
        │
        ▼
   board.Save(output_path)
@@ -477,7 +508,8 @@ fp.Pads()                                                # 获取所有焊盘
 # Footprint 写入
 fp.SetPosition(pcbnew.VECTOR2I(x_nm, y_nm))              # 设置位置
 fp.SetOrientationDegrees(degrees)                        # 设置旋转
-fp.SetLayer(layer_id)                                    # 设置所在层
+fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)  # 换面（勿用 SetLayer）
+fp.IsFlipped()                                           # 是否在背面（等价于父层==B.Cu）
 
 # ---- Pad 操作 ----
 pad = fp.Pads()[0]                                       # 获取第一个焊盘

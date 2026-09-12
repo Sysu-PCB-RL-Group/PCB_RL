@@ -37,7 +37,13 @@ def _get_kicad_path():
 
 
 def _init_kicad():
-    """在首次调用时初始化 KiCad Python 环境。"""
+    """在首次调用时初始化 KiCad Python 环境。
+
+    必须实际 import pcbnew 才算成功：pcbnew 是绑定 python3.11 的扩展模块，
+    在 3.12 等其他版本下 add_dll_directory 会成功、import 才失败
+    （python311.dll conflicts）。只判断 add_dll_directory 会让测试
+    以 "name 'pcbnew' is not defined" 这种误导性错误 FAIL 而不是 SKIP。
+    """
     kicad_path = _get_kicad_path()
     if not kicad_path or not os.path.isdir(kicad_path):
         return False
@@ -46,8 +52,13 @@ def _init_kicad():
         os.add_dll_directory(os.path.join(kicad_path, "bin"))
         sys.path.insert(0, os.path.join(kicad_path, "bin", "Lib", "site-packages"))
         sys.path.insert(0, os.path.join(kicad_path, "bin"))
-        return True
     except OSError:
+        return False
+
+    try:
+        import pcbnew  # noqa: F401
+        return True
+    except ImportError:
         return False
 
 
