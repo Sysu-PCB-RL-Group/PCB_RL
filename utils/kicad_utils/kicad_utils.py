@@ -191,18 +191,59 @@ class KiCadUtils:
 
     # -------------------- 基础加载 / 缓存 --------------------
 
+    @staticmethod
+    def _preflight(pcb_path: str) -> bool:
+        """子进程预检，挡住会让 LoadBoard 无界阻塞的板。
+
+        返回 True = 可以继续加载。
+
+        刻意做成惰性导入 + 全异常降级：
+          * kicad_utils.py 会被 tests/test_mock_geometry.py 用
+            spec_from_file_location 以【非包身份】加载，相对导入会失败，
+            故只用绝对导入；
+          * 那些测试还会把 sys.modules["utils.kicad_utils"] 换成 MagicMock，
+            导入到的东西可能不是真函数；
+          * 预检本身绝不应该成为加载失败的新原因——任何意外都放行，
+            交回给原路径处理（最坏情况退化成修复前的行为）。
+        """
+        if not KICAD_AVAILABLE:
+            return True
+        try:
+            from utils.kicad_utils.board_preflight import (
+                preflight_enabled, probe_board, format_skip_line,
+            )
+            if not preflight_enabled():
+                return True
+            result = probe_board(pcb_path)
+            if result.ok:
+                return True
+            print(format_skip_line(result))
+            return False
+        except Exception as e:                      # noqa: BLE001
+            print(f"[WARN] 预检不可用，直接加载: {e}")
+            return True
+
     def load_board(self, pcb_path: str) -> bool:
         """加载 PCB 文件并缓存所有核心数据。
 
         依次执行 footprint 缓存、元器件信息提取、网络连接解析和板框边界计算，
         最后打印加载统计日志。
 
+        加载前先做一次子进程预检（见 utils/kicad_utils/board_preflight.py）：
+        pcbnew.LoadBoard 在文本引用了本机未安装的字体会**无界阻塞**
+        （实测某板阻塞 168 分钟仍未返回、CPU≈0%），线程与 signal 都打不断，
+        因此在主进程里直接调用可能让整个训练永久挂死。预检用独立子进程 +
+        15s 硬超时把这种板挡在外面（PCB_LOAD_TIMEOUT / PCB_PREFLIGHT 可调）。
+
         Args:
             pcb_path: PCB 文件路径（.kicad_pcb 格式）
 
         Returns:
-            True 加载成功，False 加载失败
+            True 加载成功，False 加载失败或被预检跳过
         """
+        if not self._preflight(pcb_path):
+            return False
+
         try:
             self.board = pcbnew.LoadBoard(pcb_path)
             if self.board is None:

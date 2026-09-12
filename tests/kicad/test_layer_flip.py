@@ -31,9 +31,10 @@ from utils.kicad_utils.kicad_utils import KiCadUtils
 pcbnew = pytest.importorskip("pcbnew")
 
 
-# 已知会让 pcbnew.LoadBoard 稳定挂死的板（KiCad 10.0.4 实测 >90s 无返回，
-# 其它板 0.01~0.10s）。与换面逻辑无关，属独立问题；此处跳过以免测试卡死。
-HANGING_BOARD_KEYWORDS = ("Button-cbd1bfb1",)
+# 不再硬编码「会挂死的板名」：load_board() 内部已有子进程预检
+# （utils/kicad_utils/board_preflight.py），挂死板会打印
+#   [SKIP] <板名>：LoadBoard超过15秒
+# 并返回 False，本 fixture 跳过它继续找下一块。见 tests/kicad/test_board_preflight.py。
 
 TOL_MM = 0.01
 
@@ -75,8 +76,6 @@ def asym_setup():
     cands.sort(key=os.path.getsize)
 
     for path in cands:
-        if any(k in path for k in HANGING_BOARD_KEYWORDS):
-            continue
         ki = KiCadUtils()
         if not ki.load_board(path):
             continue
