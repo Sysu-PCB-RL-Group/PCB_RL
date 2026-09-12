@@ -264,11 +264,22 @@ class ExpertTrajectoryGenerator:
             if PCBUtils.check_keepout(bbox, keepout_zones):
                 return False
 
-        self_pkg = snapshot[comp_id].get("package_type", 0)
+        self_state = snapshot[comp_id]
+        self_pkg = self_state.get("package_type", 0)
+        layer_aware = getattr(Config, "LAYER_AWARE_COLLISION", False)
 
         # 全局检查：遍历所有元件（含尚未放置者），跳过自身
         for other_id, other_state in snapshot.items():
             if other_id == comp_id:
+                continue
+            # 异面且双方无通孔 -> XY 重叠合法（与 env._detect_collisions 同一判定，
+            # 收敛在 PCBUtils.layers_allow_xy_overlap；两处标准必须一致，否则
+            # 专家轨迹会生成一个 env 判为违规的布局）
+            if PCBUtils.layers_allow_xy_overlap(
+                self_state.get("layer", 0), self_state.get("has_pth", False),
+                other_state.get("layer", 0), other_state.get("has_pth", False),
+                layer_aware,
+            ):
                 continue
             other_bbox = other_state["bbox"]
             other_pkg = other_state.get("package_type", 0)
@@ -333,6 +344,7 @@ class ExpertTrajectoryGenerator:
                     "is_fixed": is_fixed,
                     "is_placed": comp_state.get("is_fixed", False),
                     "package_type": comp_state.get("package_type", 0),
+                    "has_pth": comp_state.get("has_pth", False),
                 }
 
         for step_idx, (comp_id, target_snapshot) in enumerate(forward_order):
@@ -662,6 +674,7 @@ class ExpertTrajectoryGenerator:
                 "layer": comp.layer,
                 "is_fixed": comp.is_fixed,
                 "is_placed": comp.is_placed,
+                "has_pth": getattr(comp, "has_pth", False),
                 "nets": list(comp.nets),
                 "footprint_w": comp.footprint_w,
                 "footprint_h": comp.footprint_h,

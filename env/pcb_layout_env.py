@@ -61,6 +61,16 @@ class Config:
     CELL_SIZE: float = 0.2       # 网格离散化单位（0.2mm/格，细化 5 倍以表达真实 0.24~0.48mm 间距）
     CONGESTION_CELL_SIZE: float = 2.0
 
+    # ---- 层感知碰撞开关 ----
+    # False（默认）= 旧行为：所有元件的 XY 投影互斥，不看层。
+    # True = 异面且双方都无通孔时，允许 XY 重叠（元件各贴自己那一面）。
+    # 为什么默认关：开了之后模型会真的去用底层，收益（可放置面积翻倍）与风险
+    # （孔位、内层走线、机械高度、装配干涉）需要 A/B 对比过再决定，见
+    # tests/test_layer_collision.py 的四组用例。
+    # 注意：这不是"层不同就跳过"——通孔贯穿所有层、keepout/出界不受层影响，
+    # 都不随此开关豁免。
+    LAYER_AWARE_COLLISION: bool = False
+
     # 固定维度上限（支持不同 PCB 使用同一网络）
     # 统一维度 100×100：罩住全 5 块板在 0.2mm 下的最大覆盖率（约 80×80），预留余量
     # 切换到大板时需恢复: MAX_MOVABLE=384, GRID_W=512, GRID_H=512
@@ -643,8 +653,20 @@ class PCBLayoutEnv(gym.Env):
         all_placed = [self.kicad.components[rid] for rid in self.placed_list]
         all_fixed_comps = self.fixed_list + all_placed
 
+        layer_aware = getattr(Config, "LAYER_AWARE_COLLISION", False)
+
         for other in all_fixed_comps:
             if other.id == component.id:
+                continue
+            # 异面且双方无通孔 -> 各贴自己那面，XY 重叠不算冲突（仅开关打开时）。
+            # 不要无条件 "层不同就 continue"：通孔贯穿所有层，插件封装叠上去
+            # 就是物理干涉。判定收在 PCBUtils.layers_allow_xy_overlap 一处，
+            # 与专家轨迹 _is_legal_placement 共用，避免两套标准打架。
+            if PCBUtils.layers_allow_xy_overlap(
+                component.layer, getattr(component, "has_pth", False),
+                other.layer, getattr(other, "has_pth", False),
+                layer_aware,
+            ):
                 continue
             threshold = Config.spacing_threshold_for(
                 component.package_type, other.package_type

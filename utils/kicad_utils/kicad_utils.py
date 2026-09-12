@@ -77,6 +77,7 @@ class Component:
     layer: int                                       # 0=TOP, 1=BOTTOM
     is_fixed: bool                                   # 是否固定（不可移动）
     is_placed: bool                                  # 是否已放置（C1 追踪）
+    has_pth: bool = False                            # 是否含通孔/安装孔焊盘（孔贯穿所有层）
     nets: List[str] = field(default_factory=list)    # 连接的 net_id 列表
     pins: List[Tuple[str, float, float]] = field(default_factory=list)
     # pins: [(pin_number, rel_x, rel_y), ...] 相对【源姿态】bbox 左上角的引脚坐标 (mm)
@@ -377,6 +378,7 @@ class KiCadUtils:
             # 下游取绝对坐标须经 pin_abs_positions()（随旋转更新），不要直接用
             # bbox[0]+rel_x——元件旋转后 bbox 尺寸/位置已变，旧公式会失真。
             pins = []
+            has_pth = False
             for pad in fp.Pads():
                 pad_pos_nm = pad.GetPosition()
                 pad_pos_mm = (
@@ -386,6 +388,18 @@ class KiCadUtils:
                 rel_x = pad_pos_mm[0] - bbox_mm[0]
                 rel_y = pad_pos_mm[1] - bbox_mm[1]
                 pins.append((pad.GetNumber(), rel_x, rel_y))
+
+                # 通孔判定：孔贯穿所有层，正反面都占位，异面重叠必须保守。
+                # 以焊盘属性为准（PTH/NPTH），drill>0 作为兜底
+                # （属性异常但确实开了孔的焊盘同样不能当纯 SMD 放行）。
+                if not has_pth:
+                    attr = pad.GetAttribute()
+                    if attr in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+                        has_pth = True
+                    else:
+                        drill = pad.GetDrillSize()
+                        if drill.x > 0 or drill.y > 0:
+                            has_pth = True
 
             # 预计算 8 个姿态（2 层 x 4 角）下各 pad 相对该姿态 bbox 中心的偏移
             # （真实 KiCad 几何，不靠任何解析公式）。
@@ -442,6 +456,7 @@ class KiCadUtils:
                 layer=layer,
                 is_fixed=is_fixed,
                 is_placed=is_fixed,      # 固定元件初始视为"已放置"
+                has_pth=has_pth,
                 nets=[],                  # 在 _cache_nets 中回填
                 pins=pins,
                 footprint_w=fp_w,

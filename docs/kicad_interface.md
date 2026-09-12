@@ -107,6 +107,7 @@ class Component:
 | `layer` | `int` | `pcbnew.LayerName(fp.GetLayer())` | "F.Cu"→0, "B.Cu"→1, 其他→2 |
 | `is_fixed` | `bool` | `fp.IsLocked()` | 固定元件不可移动 |
 | `is_placed` | `bool` | 初始值 = `is_fixed` | 固定元件视为"已放置" |
+| `has_pth` | `bool` | `pad.GetAttribute() ∈ {PTH, NPTH}`（兜底 `GetDrillSize() > 0`） | 含通孔/安装孔焊盘。孔贯穿所有层，层感知碰撞（`Config.LAYER_AWARE_COLLISION`）据此拒绝异面重叠 |
 | `nets` | `List[str]` | 遍历 pad netcode 回填 | 由 `_cache_nets()` 填充 |
 | `pins` | `[(pin, rx, ry)]` | `fp.Pads()` → `pad.GetPosition()` | **相对源姿态 AABB 左上角**的偏移 mm |
 | `footprint_w` | `float` | `pcbnew.ToMM(hull.GetWidth())` | 源姿态 AABB 宽度（非 0° 尺寸） |

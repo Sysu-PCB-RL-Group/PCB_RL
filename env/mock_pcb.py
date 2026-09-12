@@ -44,6 +44,7 @@ class MockComponent:
     layer: int = 0
     is_fixed: bool = False
     is_placed: bool = False
+    has_pth: bool = False          # 含通孔/安装孔焊盘（孔贯穿所有层，异面不可重叠）
     nets: List[str] = field(default_factory=list)
     pins: List[Tuple[str, float, float]] = field(default_factory=list)
     # pins: [(pin_number, rel_x, rel_y)] 相对 bbox 左上角（源姿态）的偏移
@@ -211,6 +212,7 @@ class MockKiCadUtils:
                 "rotation": c.rotation,
                 "layer": c.layer,
                 "is_fixed": c.is_fixed,
+                "has_pth": bool(getattr(c, "has_pth", False)),
             }
             for ref, c in components.items()
         }
@@ -462,6 +464,7 @@ def load_pcb_from_json(json_path: str) -> MockKiCadUtils:
             layer=comp_data.get("layer", 0),
             is_fixed=comp_data.get("is_fixed", False),
             is_placed=comp_data.get("is_placed", False),
+            has_pth=comp_data.get("has_pth", False),
             nets=comp_data.get("nets", []),
             pins=[tuple(p) for p in comp_data.get("pins", [])],
             footprint_w=comp_data.get("footprint_w", 0.0),

@@ -95,6 +95,29 @@ def asym_comp(tmp_path):
 
 
 @pytest.mark.require_kicad
+def test_has_pth_matches_pad_attributes(kicad_pcb_path):
+    """Component.has_pth 必须与真实焊盘属性一致（层感知碰撞的依据）。
+
+    KiCad 的 pad 属性 API 在大版本间改过名（Pos0 -> FPRelativePosition 之类），
+    这条把 PTH/NPTH 判定钉在真实数据上：一旦 API 变动导致判定恒为 False，
+    层感知碰撞就会把通孔封装当纯 SMD 放行 —— 那是物理干涉，必须测试拦住。
+    """
+    ki = KiCadUtils()
+    assert ki.load_board(kicad_pcb_path) is True
+    n_pth = 0
+    for ref, comp in ki.components.items():
+        fp = ki.footprints[ref]
+        truth = any(
+            pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH)
+            or pad.GetDrillSize().x > 0 or pad.GetDrillSize().y > 0
+            for pad in fp.Pads()
+        )
+        assert comp.has_pth == truth, f"{ref}: has_pth={comp.has_pth} 真实={truth}"
+        n_pth += bool(truth)
+    assert n_pth >= 1, "样本里应有通孔封装，否则这条测试是空转"
+
+
+@pytest.mark.require_kicad
 class TestPinPose:
 
     # ---------------------------------------------------------- 合成非对称板

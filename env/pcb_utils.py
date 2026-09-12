@@ -19,6 +19,44 @@ class PCBUtils:
     # ========== C2：AABB 碰撞检测 ==========
 
     @staticmethod
+    def layers_allow_xy_overlap(
+        layer_a: int, pth_a: bool,
+        layer_b: int, pth_b: bool,
+        layer_aware: bool,
+    ) -> bool:
+        """两个元件是否允许在 XY 投影上重叠。
+
+        仅当三条同时成立才允许（**不是**"层不同就放行"）：
+          1. layer_aware 开关打开（默认关，便于 A/B 对比）；
+          2. 两层都是标准层（0=TOP / 1=BOTTOM）且不相同 —— 层 2 是内层/未知
+             （见 kicad_utils 的 layer 编码），语义不明，一律保守；
+          3. 双方都不含通孔 —— 孔贯穿所有层，正面背面都占位；安装孔(NPTH)
+             同样如此。任一方有孔就退回旧的保守判定。
+
+        为什么不做"层不同就 continue"：同一 XY 上叠两个元件只在**两面都是
+        纯 SMD** 时才真的不冲突。通孔封装（排针/连接器/插件电阻，本数据集里
+        大量存在）叠上去就是物理干涉。
+
+        注意本判定只管元件-元件。keepout 禁布区、板框出界不随层豁免，
+        由各自的检查独立负责（见 _detect_collisions）。
+
+        Args:
+            layer_a/pth_a: 元件 A 的层编码 / 是否含通孔
+            layer_b/pth_b: 元件 B 的层编码 / 是否含通孔
+            layer_aware:  是否启用层感知碰撞（Config.LAYER_AWARE_COLLISION）
+
+        Returns:
+            True 表示允许在 XY 上重叠（调用方应跳过这对元件的重叠惩罚）
+        """
+        if not layer_aware:
+            return False
+        if pth_a or pth_b:
+            return False
+        if layer_a not in (0, 1) or layer_b not in (0, 1):
+            return False
+        return layer_a != layer_b
+
+    @staticmethod
     def bbox_overlap_penalty(
         a: Tuple[float, float, float, float],
         b: Tuple[float, float, float, float],
