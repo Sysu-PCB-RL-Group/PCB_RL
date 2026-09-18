@@ -1,5 +1,12 @@
 # 专家轨迹生成诊断报告：灯板2 / Button（对照 开关小板）
 
+<!-- STALE-BANNER -->
+> ⚠️ **上一代文档（已作废，仅作历史记录/对照）**：本文描述的是重构前（≤2026-09-15）的架构 ——
+> 如 `MAX_MOVABLE` / `GRID_W` / `GRID_H` / `CELL_SIZE=0.2`、7 元动作 `(comp_id, x1,y1,x2,y2, rot, layer)`、
+> 违规罚分式 reward、`SPEC v2.x` 等。
+> **现行口径一律以 [`讨论结果/导入信息重构.md`](讨论结果/导入信息重构.md) 为准**：动作 =（旋转 k, cell i, j）、L/G = 4×200×200、
+> 违规被 mask **禁止**（不罚分）、固定顺序不选件、开槽随件（未放置不在板上）。
+
 > 生成日期：2026-09-06
 > 方法：复用 `env._detect_collisions` / `_compute_expert_reward`（`_build_step_transitions` L517 同口径），
 > 对 `data/expert_transitions/*_expert.json` 抽 50 条轨迹（连续 5 步 chunk）做权威复检。

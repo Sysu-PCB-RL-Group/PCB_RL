@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "travellium-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/travellium-easyedapro.kicad_sym") (options "") (descr ""))
+)

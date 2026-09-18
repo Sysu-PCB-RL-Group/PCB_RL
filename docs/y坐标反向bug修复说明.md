@@ -1,5 +1,12 @@
 # KiCad 数据加载 y 坐标反向 Bug 修复说明
 
+<!-- STALE-BANNER -->
+> ⚠️ **上一代文档（已作废，仅作历史记录/对照）**：本文描述的是重构前（≤2026-09-15）的架构 ——
+> 如 `MAX_MOVABLE` / `GRID_W` / `GRID_H` / `CELL_SIZE=0.2`、7 元动作 `(comp_id, x1,y1,x2,y2, rot, layer)`、
+> 违规罚分式 reward、`SPEC v2.x` 等。
+> **现行口径一律以 [`讨论结果/导入信息重构.md`](讨论结果/导入信息重构.md) 为准**：动作 =（旋转 k, cell i, j）、L/G = 4×200×200、
+> 违规被 mask **禁止**（不罚分）、固定顺序不选件、开槽随件（未放置不在板上）。
+
 > 日期：2026-08-18
 > 影响模块：`utils/kicad_utils/kicad_utils.py`（核心）、`utils/visualization.py`
 > 状态：已修复 + 已验证

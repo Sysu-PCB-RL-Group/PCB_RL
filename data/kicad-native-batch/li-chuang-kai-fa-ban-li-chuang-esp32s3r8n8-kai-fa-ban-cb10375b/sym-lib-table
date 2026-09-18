@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "li-chuang--easyedapro") (type "KiCad") (uri "${KIPRJMOD}/li-chuang--easyedapro.kicad_sym") (options "") (descr ""))
+)

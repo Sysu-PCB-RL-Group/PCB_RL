@@ -1,0 +1,101 @@
+(kicad_sch
+	(version 20260306)
+	(generator "eeschema")
+	(generator_version "10.0")
+	(uuid "078cc60d-ccf9-405f-a2c6-13b8f6c8cd24")
+	(paper "A4")
+	(lib_symbols)
+	(sheet
+		(at 5.08 13.97)
+		(size 12.7 3.81)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "4aa9f866-250a-4cd0-b385-f289cdb5d241")
+		(property "Sheetname" "2C"
+			(at 5.08 13.2584 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "2_2C.kicad_sch"
+			(at 5.08 18.3646 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "eda_uahyxtbgs-165w-three-way-multi-protocol-fa-dc91a91e--300W四路彩屏桌面电源（彩屏版）-56ddf4ed"
+				(path "/078cc60d-ccf9-405f-a2c6-13b8f6c8cd24"
+					(page "2")
+				)
+			)
+		)
+	)
+	(sheet
+		(at 5.08 5.08)
+		(size 12.7 3.81)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "99f19db2-f7eb-456b-8aeb-74e8dbb6e2fc")
+		(property "Sheetname" "1A1C"
+			(at 5.08 4.3684 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "1_1A1C.kicad_sch"
+			(at 5.08 9.4746 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "eda_uahyxtbgs-165w-three-way-multi-protocol-fa-dc91a91e--300W四路彩屏桌面电源（彩屏版）-56ddf4ed"
+				(path "/078cc60d-ccf9-405f-a2c6-13b8f6c8cd24"
+					(page "1")
+				)
+			)
+		)
+	)
+	(embedded_fonts no)
+)

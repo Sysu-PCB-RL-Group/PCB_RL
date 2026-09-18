@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "lr1388-esp-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/lr1388-esp-easyedapro.kicad_sym") (options "") (descr ""))
+)

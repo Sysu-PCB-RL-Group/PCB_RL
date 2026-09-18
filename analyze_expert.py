@@ -5,10 +5,11 @@ Req2（reward 标准一致性）由 code-reviewer 静态审查 + 本脚本附带
 
 用法（需 KICAD_PATH，Req1 需要真实 KiCad 取完美布局；Req3/4/5 仅需 raw 文件）：
     $env:KICAD_PATH="E:\\Kicad"
-    & E:\\miniconda\\envs\\pcb_rl_311\\python.exe analyze_expert.py --board 开关小板
+    & E:\\miniconda\\envs\\pcb_rl_311\\python.exe analyze_expert.py --board IMU
 
 说明：
-    --board 仅用于定位 PCB 与 raw 文件名；PowerShell 中文参数乱码时可传 --board airlink 子串。
+    --board 仅用于定位 PCB 与 raw 文件名，缺省用默认单板（utils.pcb_scan.DEFAULT_BOARD）；
+    该子串为纯 ASCII，可规避 PowerShell 中文参数 GBK 乱码。
 """
 import argparse
 import glob
@@ -18,6 +19,8 @@ import random
 import statistics
 import sys
 from collections import Counter
+
+from utils.pcb_scan import DEFAULT_BOARD
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data", "kicad-native-batch")
@@ -287,7 +290,7 @@ def assert_reward_standard():
 
 def main():
     ap = argparse.ArgumentParser(description="专家轨迹六维审查")
-    ap.add_argument("--board", default="开关小板", help="PCB 名称子串")
+    ap.add_argument("--board", default=DEFAULT_BOARD, help=f"PCB 名称子串（默认 '{DEFAULT_BOARD}' = 默认单板）")
     ap.add_argument("--raw-path", default=None, help="raw 轨迹 json 路径（缺省自动查找）")
     ap.add_argument("--seed", type=int, default=20260824)
     ap.add_argument("--sample", type=int, default=10)

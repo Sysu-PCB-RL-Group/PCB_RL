@@ -29,7 +29,7 @@ from run import Runner
 from dqn import DQNAgent
 from env.pcb_layout_env import Config
 from inference_eval import run_inference_eval
-from utils.pcb_scan import find_pcb_files
+from utils.pcb_scan import DEFAULT_BOARD, find_pcb_files
 from utils.visualization import plot_loss_compare, plot_reward_compare, plot_inference_eval
 
 logger = logging.getLogger(__name__)
@@ -38,8 +38,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 
-# 默认参数（用户澄清：默认开关小板，跑 10000 epi）
-DEFAULT_BOARD = "开关小板"
+# 默认参数（默认单板 = utils.pcb_scan.DEFAULT_BOARD，跑 10000 epi）
 DEFAULT_TOTAL_EPISODES = 10000
 DEFAULT_SEED = 114514
 
@@ -69,7 +68,7 @@ def get_config() -> argparse.Namespace:
     )
     parser.add_argument(
         "--board", type=str, default=DEFAULT_BOARD,
-        help="训练板子名（子串匹配），默认开关小板",
+        help=f"训练板子名（子串匹配），默认 '{DEFAULT_BOARD}'",
     )
     parser.add_argument(
         "--total_episodes", type=int, default=DEFAULT_TOTAL_EPISODES,
@@ -253,7 +252,7 @@ def run():
     logger.info(f"产物目录: {compare_root}")
     logger.info("=" * 70)
 
-    # 逐板对比（默认单板：开关小板）
+    # 逐板对比（默认单板：utils.pcb_scan.DEFAULT_BOARD）
     for pcb_name, _filepath in boards:
         pcb_short = pcb_name.replace(".kicad_pcb", "")
         board_out_dir = os.path.join(compare_root, pcb_short)

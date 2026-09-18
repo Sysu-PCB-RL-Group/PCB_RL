@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "trumpx-ipa-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/trumpx-ipa-easyedapro.kicad_sym") (options "") (descr ""))
+)

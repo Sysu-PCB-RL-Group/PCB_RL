@@ -10,21 +10,22 @@ EXPERT_TRANSITIONS_DIR 等），保证「唯一变量原则」，不修改原 co
   D. reward 尺度错配  : EXPERT_APPLY_PENALTIES=0 vs 1
   E. 跨板 vs 单板     : board=None(全部板) vs board=指定板
 
-用法示例：
-  # 实验 D：验证 reward 错配假说（开关小板，各 3000 轮）
-  python run_experiments.py --experiment D --board 开关小板 --episodes 3000
+用法示例（--board 缺省 = utils.pcb_scan.DEFAULT_BOARD，即 4.IMU小板）：
+  # 实验 D：验证 reward 错配假说（默认单板，各 3000 轮）
+  python run_experiments.py --experiment D --episodes 3000
 
-  # 实验 A：专家注入有效性（开关小板，各 5000 轮）
-  python run_experiments.py --experiment A --board 开关小板 --episodes 5000
+  # 实验 A：专家注入有效性（默认单板，各 5000 轮）
+  python run_experiments.py --experiment A --episodes 5000
 
-  # 实验 E：跨板 vs 单板迁移（开关小板，各 5000 轮）
-  python run_experiments.py --experiment E --board 开关小板 --episodes 5000
+  # 实验 E：跨板 vs 单板迁移（默认单板，各 5000 轮）
+  python run_experiments.py --experiment E --episodes 5000
 
-  # A+D+E 全部顺序执行（每组 10000 轮，全部 5 板）
+  # A+D+E 全部顺序执行（每组 10000 轮）
   python run_experiments.py --experiment A,D,E --episodes 10000
 
 产物：result/experiments/<exp>/<group>/ 下，与 run_compare.py 结构一致。
 说明：实验 E 中跨板训练只跑一次，结果对各目标板复用；--board 为空时对全部板逐个做单板对比。
+注意：当前仅默认单板（4.IMU小板）兼容固定维度框架，其余 19 块超限 → 跨板臂（board=None）暂不可用。
 """
 
 import argparse
@@ -36,7 +37,7 @@ import sys
 import torch
 
 from run import Runner
-from utils.pcb_scan import find_pcb_files
+from utils.pcb_scan import DEFAULT_BOARD, find_pcb_files
 from utils.visualization import plot_loss_compare, plot_reward_compare
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,9 @@ def get_config() -> argparse.Namespace:
              "/ F=出界惩罚强度 / G=Curriculum升温速度+多板泛化 / H=Early stopping, 例如 A,D,E",
     )
     parser.add_argument(
-        "--board", type=str, default=None,
-        help="板子名子串（实验 E 中留空=跨板训练）",
+        "--board", type=str, default=DEFAULT_BOARD,
+        help=f"板子名子串（默认 '{DEFAULT_BOARD}' = 唯一兼容当前框架的板；"
+             f"留空=跨板训练，但当前其余板均超限，跨板臂不可用）",
     )
     parser.add_argument(
         "--episodes", type=int, default=3000,

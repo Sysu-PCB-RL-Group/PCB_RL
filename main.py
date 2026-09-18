@@ -1,13 +1,16 @@
 """PCB_RL CLI 入口。
 
-使用真实 KiCad PCB 数据训练：python main.py（默认训练开关小板，可用 --board 指定其它板）
+使用真实 KiCad PCB 数据训练：python main.py（默认只训练默认单板「4.IMU小板」，可用 --board 指定其它板）
 
-基于 SPEC v2.1。
+⚠️ **上一代训练栈**（基于 SPEC v2.1）：动作/观测/奖励口径**已被取代** —— 现行建模口径见
+`docs/讨论结果/导入信息重构.md`（动作 =（旋转 k, cell i, j）、L/G = 4×200×200、违规被 mask 禁止）。
 """
 import argparse
 import os
 import sys
 import torch
+
+from utils.pcb_scan import DEFAULT_BOARD
 
 
 def get_config():
@@ -40,8 +43,9 @@ def get_config():
     parser.add_argument("--total_episodes", type=int, default=10000, help="总训练 episode 数")
     parser.add_argument("--max_episode_step", type=int, default=100, help="每个 episode 最大步数")
     parser.add_argument(
-        "--board", type=str, default=None,
-        help="指定训练的板子名（如 '开关小板'），不指定则训练所有板子",
+        "--board", type=str, default=DEFAULT_BOARD,
+        help=f"指定训练的板子名（对 .kicad_pcb 文件名做子串匹配）；"
+             f"默认 '{DEFAULT_BOARD}'（唯一兼容当前固定维度框架的板）",
     )
     parser.add_argument(
         "--with_expert", action="store_true",

@@ -1,4 +1,0 @@
-(sym_lib_table
-	(version 7)
-	(lib (name "lovelessin-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/lovelessin-easyedapro.kicad_sym") (options "") (descr ""))
-)

@@ -601,18 +601,32 @@ def _run_single_board_inference(args, pcb_path: str, agent: "DQNAgent"):
 def main():
     """主推理流程：支持单文件或批量目录模式。
 
-    - 单文件：python run_inference.py --pcb path/to/board.kicad_pcb
-    - 批量：python run_inference.py --pcb data/kicad-native-batch/（默认）
+    - 默认（单文件）：python run_inference.py
+        只推理默认单板（utils.pcb_scan.DEFAULT_BOARD = 唯一兼容当前固定维度框架的板）
+    - 单文件（指定）：python run_inference.py --pcb path/to/board.kicad_pcb
+    - 批量：python run_inference.py --pcb data/kicad-native-batch/
     """
     import argparse
+
+    from utils.pcb_scan import DEFAULT_BOARD, find_pcb_files
+
+    # 默认单板：只推理默认单板（其余 19 块板超 MAX_MOVABLE/GRID 上限，无法完成推理）；
+    # 显式传目录即切回批量模式（原有行为）。
+    _batch_dir = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "data", "kicad-native-batch",
+    ))
+    _default_pcb = next(
+        (p for p in find_pcb_files(_batch_dir)
+         if DEFAULT_BOARD in os.path.basename(p)),
+        _batch_dir,
+    )
 
     parser = argparse.ArgumentParser(description="PCB Layout Inference Demo")
     parser.add_argument(
         "--pcb", type=str,
-        default=os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "data", "kicad-native-batch",
-        )),
-        help=".kicad_pcb 文件路径或 batch 根目录 (默认：data/kicad-native-batch/).",
+        default=_default_pcb,
+        help=f".kicad_pcb 文件路径或 batch 根目录 "
+             f"(默认：默认单板 '{DEFAULT_BOARD}'；传目录则批量推理).",
     )
     parser.add_argument(
         "--export", type=str, default=None,

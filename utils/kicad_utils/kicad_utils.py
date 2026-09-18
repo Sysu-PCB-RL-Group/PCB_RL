@@ -6,6 +6,11 @@
 维护方：KiCad 导入导出负责同学。
 接口契约详见 docs/kicad_interface.md。
 """
+# 注解延迟求值：本模块的注解里出现 `pcbnew.*`，而 `pcbnew` 只在 KICAD_PATH 就绪时才存在。
+# 不加这行时，类体里的默认参数注解（如 `get_raw_board_outline(self, board: Optional[pcbnew.BOARD] = None)`）
+# 会在**导入期**求值 ⇒ 未设 KICAD_PATH 的环境直接 `NameError: name 'pcbnew' is not defined`
+# （整条导入链 env/__init__ → pcb_layout_env → utils.kicad_utils 全部炸掉，Mock 测试也同归于尽）。
+from __future__ import annotations
 
 import os
 import sys
@@ -29,6 +34,18 @@ else:
     except (OSError, ImportError) as e:
         print(f"[WARN] KiCad 加载失败 ({KICAD_PATH}): {e}")
         print("       Mock 模式仍可用，训练前请确认 KICAD_PATH 正确")
+
+# 抑制 KiCad 的"字体缺失"模态弹窗（例：Font 'Rockwell' not found; substituting 'DejaVu Sans Book'）。
+# 必须在任何 LoadBoard / 字体度量之前设置，否则会弹出对话框卡住进程
+# （无人值守训练/脚本会挂死）。详见《导入信息重构》§5.8（D9 字体弹窗）。
+if KICAD_AVAILABLE:
+    try:
+        import wx
+
+        wx.Log.SetActiveTarget(wx.LogStderr())   # 日志改走 stderr，不弹窗
+        wx.Log.SetLogLevel(wx.LOG_Error)         # 只保留 error 级；字体替换属 info/warning，被吞掉
+    except Exception as e:  # pragma: no cover
+        print(f"[WARN] wx 日志抑制失败（可能出现字体弹窗）: {e}")
 
 # ===================== 固定元件启发式 =====================
 
@@ -160,24 +177,14 @@ class Net:
     connections: List[Tuple[str, str]]               # [(comp_id, pin_number), ...]
     is_power: bool = False                           # 是否电源网络（GND/VCC/VDD/VSS/PWR）
 
-    # 电源网络判定：精确匹配（高置信度）+ 前缀匹配（中等置信度）
-    _POWER_NET_EXACT = {"VCC", "VDD", "VSS", "GND", "PWR", "VEE", "VPP", "VREF",
-                        "AGND", "DGND", "AVCC", "AVDD", "DVCC", "DVDD"}
-    _POWER_NET_PREFIXES = ("VCC", "VDD", "VSS", "VEE",
-                           "+5V", "+3.3V", "+3V3", "+12V", "+1.8V",
-                           "VIN", "VBUS", "VBAT", "VDDC", "VDDA",
-                           "VCCINT", "VCCIO", "VCCPLL")
+    # 电源网络判定的**词表只在 `pcb_model.is_power_net` 一处维护**（避免两份实现漂移：
+    # HPWL 排除电源/地网的口径必须与 reward 一致 —— 见《导入信息重构》§7.1 + §2.5）。
 
     @staticmethod
     def is_power_net(net_name: str) -> bool:
-        """判定是否为电源网络（大小写不敏感）。
-
-        先做精确白名单匹配，再按前缀模糊匹配覆盖常见命名变体。
-        """
-        upper = net_name.upper()
-        if upper in Net._POWER_NET_EXACT:
-            return True
-        return any(upper.startswith(p) for p in Net._POWER_NET_PREFIXES)
+        """判定是否为电源网络（大小写不敏感）—— **委托给单点定义**。"""
+        from utils.kicad_utils.pcb_model import is_power_net as _impl
+        return _impl(net_name)
 
 
 # ===================== KiCad 核心工具类 =====================
@@ -586,6 +593,89 @@ class KiCadUtils:
         except Exception:
             pass
         return keepouts
+
+    # -------------------- 板框：原始数据（raw） --------------------
+
+    def get_raw_board_outline(self, board: Optional[pcbnew.BOARD] = None) -> Dict[str, Any]:
+        """读取板框的**原始几何**（raw）。
+
+        转换数据只取其中一个 AABB（见 `pcb_model.BoardOutline`）；本方法留给排查/测试/
+        可视化，以及将来需要升级口径时使用（训练侧不读）。
+
+        Returns:
+            dict:
+              - `polygon`: 每个外轮廓的顶点 + 各内孔顶点（mm）
+              - `polygon_bbox`: 板轮廓外接矩形 AABB（＝转换数据的 `BoardOutline.bbox`）
+              - `edges_bbox`: `GetBoardEdgesBoundingBox()`（含线宽，比中心线 AABB 大 0.05~0.14mm）
+              - `edges_items`: 板级 Edge.Cuts 图形（类型 / 线宽 / AABB / 端点）
+              - `footprint_edges`: 封装内嵌 Edge.Cuts 图形（带 ref；**板框开槽的来源**）
+              - `inferred`: 是否必须传 `aInferOutlineIfNecessary=True` 才能闭合（300W / gd32vw553）
+        """
+        b = board if board is not None else self.board
+        if b is None:
+            return {}
+
+        poly = pcbnew.SHAPE_POLY_SET()
+        inferred = not b.GetBoardPolygonOutlines(poly, False)
+        if inferred or poly.OutlineCount() == 0:
+            poly = pcbnew.SHAPE_POLY_SET()
+            b.GetBoardPolygonOutlines(poly, True)
+            inferred = True
+
+        def _pt(p) -> Tuple[float, float]:
+            return (pcbnew.ToMM(p.x), pcbnew.ToMM(p.y))
+
+        def _chain(chain) -> List[Tuple[float, float]]:
+            return [_pt(chain.CPoint(i)) for i in range(chain.PointCount())]
+
+        def _box(box) -> Tuple[float, float, float, float]:
+            return (pcbnew.ToMM(box.GetLeft()), pcbnew.ToMM(box.GetTop()),
+                    pcbnew.ToMM(box.GetRight()), pcbnew.ToMM(box.GetBottom()))
+
+        outlines = [
+            {
+                "vertices": _chain(poly.Outline(i)),
+                "holes": [_chain(poly.Hole(i, h)) for h in range(poly.HoleCount(i))],
+            }
+            for i in range(poly.OutlineCount())
+        ]
+
+        edges_items: List[Dict[str, Any]] = []
+        for d in b.GetDrawings():
+            if d.GetLayer() != pcbnew.Edge_Cuts:
+                continue
+            item: Dict[str, Any] = {
+                "type": d.GetClass(),
+                "width": pcbnew.ToMM(d.GetWidth()),
+                "aabb": _box(d.GetBoundingBox()),
+            }
+            try:
+                item["start"] = _pt(d.GetStart())
+                item["end"] = _pt(d.GetEnd())
+            except Exception:
+                pass
+            edges_items.append(item)
+
+        footprint_edges: List[Dict[str, Any]] = []
+        for fp in b.GetFootprints():
+            for it in fp.GraphicalItems():
+                if it.GetLayer() != pcbnew.Edge_Cuts:
+                    continue
+                footprint_edges.append({
+                    "ref": fp.GetReference(),
+                    "type": it.GetClass(),
+                    "width": pcbnew.ToMM(it.GetWidth()),
+                    "aabb": _box(it.GetBoundingBox()),
+                })
+
+        return {
+            "polygon": outlines,
+            "polygon_bbox": _box(poly.BBox()),
+            "edges_bbox": _box(b.GetBoardEdgesBoundingBox()),
+            "edges_items": edges_items,
+            "footprint_edges": footprint_edges,
+            "inferred": bool(inferred),
+        }
 
     # -------------------- 导出 --------------------
 

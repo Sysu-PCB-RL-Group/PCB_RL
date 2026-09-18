@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "esp-colleg-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/esp-colleg-easyedapro.kicad_sym") (options "") (descr ""))
+)

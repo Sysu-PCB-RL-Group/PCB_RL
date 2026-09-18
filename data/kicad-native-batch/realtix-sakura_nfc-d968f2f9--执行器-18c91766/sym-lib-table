@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "realtix-sa-easyedapro") (type "KiCad") (uri "${KIPRJMOD}/realtix-sa-easyedapro.kicad_sym") (options "") (descr ""))
+)

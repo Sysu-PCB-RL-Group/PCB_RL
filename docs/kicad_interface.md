@@ -1,5 +1,13 @@
 # KiCad 导入导出接口对齐文档
 
+<!-- STALE-BANNER -->
+> ⚠️ **部分作废（2026-09-18 标注）**：本文描述的是 `utils/kicad_utils/kicad_utils.py`
+> （**上一代模块**）。其中 **`export_layout()` 导出路径仍在使用**（`tests/kicad/test_export_layout.py` 在测）；
+> 但它对"元件/网格/动作"的描述（`MAX_MOVABLE` / `GRID_W/H` / `CELL_SIZE=0.2` / 7 元动作 / `SPEC v2.x`）
+> **已被现行设计取代**：**转换数据模型见 `utils/kicad_utils/pcb_model.py`，
+> 建模口径一律以 [`讨论结果/导入信息重构.md`](讨论结果/导入信息重构.md) 为准**
+> （动作 =（旋转 k, cell i, j）、L/G = 4×200×200、违规被 mask 禁止、开槽随件）。
+
 > **文档目的**：定义 KiCad 导入导出模块的双向数据契约，用于 RL 团队与 KiCad 负责同学之间的接口对齐。
 > **模块位置**：`utils/kicad_utils/` 是 RL 流程的**唯一数据入口**，所有 PCB 信息的读取和写回均通过该模块完成。
 > **维护方**：KiCad 导入导出同学独立负责该模块的实现和维护。

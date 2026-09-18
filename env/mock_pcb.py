@@ -1,8 +1,12 @@
 """合成 PCB 数据与 Mock 工具（无需 KiCad）。
 
-将 tests/test_dqn_pipeline.py 中的 MockComponent/MockNet/MockKiCadUtils
-和 build_synthetic_pcb()/create_patched_env() 抽取为独立模块，
-供 tests 和 scripts 等复用。
+将原 `tests/test_dqn_pipeline.py` 中的 MockComponent/MockNet/MockKiCadUtils
+和 build_synthetic_pcb()/create_patched_env() 抽取为独立模块，供 tests 和 scripts 等复用。
+
+⚠️ **上一代（2026-09-18 标注）**：本模块服务于旧栈（`PCBLayoutEnv`/`PCBUtils`/DQN）的合成测试；
+那些测试已随"测试清理"删除（副本见 `.codebuddy/artifacts/legacy_tests_backup/`）。
+新栈（`env/grid_render|violations|order_plan|lookahead|board_state`）**不使用本模块**，
+其合成数学守门见 `tests/test_grid_render_math.py`。
 """
 
 import sys

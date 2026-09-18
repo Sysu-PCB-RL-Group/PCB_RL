@@ -8,19 +8,20 @@ import os
 import argparse
 
 from run import Runner
+from utils.pcb_scan import DEFAULT_BOARD
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run A-group (with_expert) experiment with current config")
-    parser.add_argument("--tag", required=True, help="experiment tag → result/exp_<tag>/开关小板/with_expert")
+    parser.add_argument("--tag", required=True, help=f"experiment tag → result/exp_<tag>/{DEFAULT_BOARD}/with_expert")
     parser.add_argument("--total_episodes", type=int, default=10000)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=114514)
     args = parser.parse_args()
 
-    save_dir = os.path.join(ROOT, "result", f"exp_{args.tag}", "开关小板", "with_expert")
+    save_dir = os.path.join(ROOT, "result", f"exp_{args.tag}", DEFAULT_BOARD, "with_expert")
     ns = argparse.Namespace(
         config_path=os.path.join(ROOT, "config", "argument.txt"),
         max_episode_step=None,
@@ -29,7 +30,7 @@ def main():
         device=args.device,
         data_dir=os.path.join(ROOT, "data", "kicad-native-batch"),
         save_dir=save_dir,
-        board="开关小板",
+        board=DEFAULT_BOARD,
         use_expert=True,
         explicit_total_episodes=False,
     )

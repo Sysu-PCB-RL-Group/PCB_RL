@@ -1,7 +1,7 @@
 """仅生成专家轨迹（不训练、不对比）。
 
 用法（在用户终端）:
-    python generate_expert_only.py --board 开关小板
+    python generate_expert_only.py --board IMU    # 缺省即默认单板（4.IMU小板）
 
 流程:
     1. 加载指定 PCB（真实 KiCad，需 KICAD_PATH）
@@ -15,6 +15,7 @@ import os
 
 from env.expert_trajectory import generate_and_save_expert_transitions
 from env.pcb_layout_env import PCBLayoutEnv, Config
+from utils.pcb_scan import DEFAULT_BOARD
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,7 +41,8 @@ def _find_pcb(board_filter: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="仅生成专家轨迹（不训练）")
-    parser.add_argument("--board", type=str, default="开关小板", help="PCB 名称子串（默认开关小板）")
+    parser.add_argument("--board", type=str, default=DEFAULT_BOARD,
+                        help=f"PCB 名称子串（默认 '{DEFAULT_BOARD}' = 默认单板）")
     args = parser.parse_args()
 
     pcb_path = _find_pcb(args.board)

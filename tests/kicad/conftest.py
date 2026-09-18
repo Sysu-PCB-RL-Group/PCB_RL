@@ -87,3 +87,50 @@ def kicad_pcb_path():
     # 优先选择最小的板子
     candidates.sort(key=lambda p: os.path.getsize(p))
     return os.path.abspath(candidates[0])
+
+
+@pytest.fixture(scope="session")
+def boards_with_models(all_kicad_pcb_paths):
+    """加载全部真实板并构建转换数据模型（session 级，供 tests/kicad 下的模型测试共享）。
+
+    返回 `[(path, board, model, raw_angles), ...]`：
+      - `raw_angles[i]` = **加载瞬间**第 i 个（有 pad 的）footprint 的文件原始角（未被任何测试旋转污染）
+      - 测试可临时旋转 footprint，但必须自负责恢复原姿态
+    """
+    from utils.kicad_utils import pcb_model  # noqa: F401  触发 bootstrap（DLL 路径 + wx 日志抑制）
+
+    pcbnew = pcb_model.pcbnew
+    out = []
+    for path in all_kicad_pcb_paths:
+        board = pcbnew.LoadBoard(path)
+        raw_angles = [
+            float(fp.GetOrientationDegrees())
+            for fp in board.GetFootprints()
+            if list(fp.Pads())
+        ]
+        out.append((path, board, pcb_model.build_model(board, path), raw_angles))
+    return out
+
+
+@pytest.fixture(scope="session")
+def all_kicad_pcb_paths():
+    """返回 data/kicad-native-batch 下**全部**真实 .kicad_pcb（默认 20 块）。
+
+    与 `kicad_pcb_path`（只取最小一块）相对：用于需要"全量真实数据"的回归测试。
+    可用环境变量 `PCB_RL_TEST_MAX_BOARDS` 限制数量（调试用），默认不限制。
+    """
+    batch_dir = os.path.join(os.path.dirname(__file__), "..", "..", "data", "kicad-native-batch")
+    candidates = []
+    for root, _dirs, files in os.walk(batch_dir):
+        for f in files:
+            if f.endswith(".kicad_pcb") and not f.endswith("best_layout.kicad_pcb"):
+                candidates.append(os.path.abspath(os.path.join(root, f)))
+
+    if not candidates:
+        pytest.skip("No .kicad_pcb files found in data/kicad-native-batch/")
+
+    candidates.sort()
+    limit = os.environ.get("PCB_RL_TEST_MAX_BOARDS", "").strip()
+    if limit.isdigit() and int(limit) > 0:
+        candidates = candidates[: int(limit)]
+    return candidates

@@ -1,6 +1,14 @@
 """PCB 布局 Gymnasium 环境（AABB-based，自回归 5 步动作分解）。
 
 基于 SPEC v2.2 完整实现。支持 pending 状态观测扩展与每步 1D 掩码。
+
+⚠️ **上一代环境（2026-09-18 标注，保留作对照，勿在新链路里使用）**：
+  * 动作 = **7 元 Tuple** `(component_id, x1, y1, x2, y2, rotation, layer)`；网格 **100×100 @0.2mm**；
+    违规是**罚分**（`W_OVERLAP_SOFT`）而非禁止。
+  * **现行口径**（`docs/讨论结果/导入信息重构.md`）：动作 =（旋转 k, cell i, j）+ `MultiDiscrete([4,200,200])`；
+    L/G = 4×200×200；**违规被 mask 禁止**；固定顺序不选件；开槽随件（未放置不在板上）。
+  * 新一代组件（已落地、待组装）：`env/grid_render.py` / `violations.py` / `order_plan.py` / `lookahead.py` / `board_state.py`。
+  * ⚠️ 旧配置旋钮 `MAX_MOVABLE` / `GRID_W` / `GRID_H`（`config/argument.txt`）**新 env 一律不得读取**（§0.6 b）。
 """
 import logging
 from typing import Tuple, Dict, List, Optional
