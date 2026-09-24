@@ -49,8 +49,7 @@ def _nets_of(comps: Sequence[Footprint], model: PcbModel):
     area: Dict[str, float] = {}
     npads: Dict[str, int] = {}
     for f in comps:
-        a = f.local_hull_aabb
-        area[f.ref] = max(0.0, (a[2] - a[0]) * (a[3] - a[1]))
+        area[f.ref] = f.local_hull_area          # 单点定义在 pcb_model.Footprint.local_hull_area
         npads[f.ref] = len(f.pads)
         nps, als = set(), set()
         for p in f.pads:
@@ -62,6 +61,22 @@ def _nets_of(comps: Sequence[Footprint], model: PcbModel):
                 nps.add(net.net_id)
         np_nets[f.ref], all_nets[f.ref] = nps, als
     return np_nets, all_nets, area, npads
+
+
+def piece_features(model: PcbModel,
+                   comps: Optional[Iterable[Footprint]] = None) -> Dict[str, Tuple[int, int]]:
+    """→ `{ref: (pad 数, 非电源 net 数)}` —— **这两个量的单点定义**（Owner 2026-09-22）。
+
+    消费者：`obs` 的两个标量（§5.5，用 `env/obs_spec` 归一化）、本模块的面积/pad 兜底、
+    将来的诊断脚本。**不要再另写一份"数 pad / 数 net"**（口径漂移是这个项目的常客）。
+
+    「非电源 net 数」= 该件的 pad 落在哪些**非电源** net 上（去重后计数）
+    ⇒ **= 0 表示该件对 `HPWL`/`σ` 零贡献**（16 板实测 **153/668 件 = 22.9%**；20 板时代为 201/857，
+    与台账 §0.6 i 的"目标零贡献件 201 件"完全吻合；其中 8 件连 net 都没有）。
+    """
+    comps = list(model.footprints) if comps is None else list(comps)
+    np_nets, _all_nets, _area, npads = _nets_of(comps, model)
+    return {f.ref: (npads[f.ref], len(np_nets[f.ref])) for f in comps}
 
 
 def area_scores(area: Dict[str, float]) -> Dict[str, float]:

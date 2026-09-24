@@ -469,8 +469,11 @@ SYNTHETIC_CHECKS: List[Tuple[str, Callable[[Any], None]]] = [
 
 _BATCH_DIR = os.path.join(ROOT, "data", "kicad-native-batch")
 
-# 快速子集：覆盖 7 类中的 A/B/C/S1/S2/出界 + "整板零违规" + 干净件
-FAST_BOARD_KEYS = ("Mini控制板切分", "esp32s3r8n8", "lyg0927", "pid-jian-yi", "elisaday")
+# 快速子集：覆盖 7 类中的 A/B/C/S1/S2 + "整板零违规" + 干净件
+# ⚠️ 2026-09-22：数据集 20 → 16 板（半孔排针板移入 `data/bad_data/`）⇒
+#    ① 原 `esp32s3r8n8` 已不在，故从名单删除；② **"出界"在整个数据集里已无正例**
+#    （16 板源布局 out_of_bounds = 0）⇒ 出界只能靠**构造用例**覆盖（`real_constructed_oob`）
+FAST_BOARD_KEYS = ("Mini控制板切分", "lyg0927", "pid-jian-yi", "elisaday", "fei1554973967")
 
 
 class RealData:
@@ -526,10 +529,9 @@ def _judge_model(mod: Any, model: PcbModel):
 
 REAL_FAST_EXPECT: Dict[str, Dict[str, int]] = {
     "Mini控制板切分": {"hard.pad_pad": 2, "hard.pad_via": 8, "soft.pad_via": 21},
-    "esp32s3r8n8": {"hard.pad_via": 20, "soft.pad_pad": 3, "soft.pad_via": 28, "out_of_bounds": 60},
     "lyg0927": {"hard.pad_keepout": 4, "soft.pad_via": 3},
     "elisaday": {"soft.pad_via": 2},
-}
+}   # 2026-09-22：原 `esp32s3r8n8` 条目随该板移出数据集一并删除（逐板计数不受其它板增删影响）
 
 
 def check_real_board_numbers(mod: Any, real: RealData) -> None:
@@ -558,12 +560,7 @@ def check_real_single_instances(mod: Any, real: RealData) -> None:
     # 硬重叠 A：Mini控制板 D3 ↔ D2（gap −0.2970）
     res = judge.judge("D3", pl["D3"], {"D2": pl["D2"]})
     _expect(mod, res, (mod.HARD_PAD_PAD,), "真实 A: D3×D2", {mod.HARD_PAD_PAD: 1})
-    # 硬重叠 B + 软间距 S2：esp32s3r8n8 U3（不与其它件比，隔离静态对象）
-    model = real.get("esp32s3r8n8")
-    judge, pl = _judge_model(mod, model)
-    res = judge.judge("U3", pl["U3"], {})
-    _expect(mod, res, (mod.HARD_PAD_VIA, mod.SOFT_PAD_VIA), "真实 B/S2: esp32 U3",
-            {mod.HARD_PAD_VIA: 19, mod.SOFT_PAD_VIA: 15})
+    # 硬重叠 B/S2：原 `esp32s3r8n8 U3` 实例随该板移出数据集一并删除（B/S2 仍由下面的 SW1 覆盖）
     # 硬重叠 B：Mini控制板 SW1（自家开槽被正确排除，只剩过孔）
     model = real.get("Mini控制板切分")
     judge, pl = _judge_model(mod, model)
@@ -576,21 +573,20 @@ def check_real_single_instances(mod: Any, real: RealData) -> None:
     res = judge.judge("U1", pl["U1"], {})
     _expect(mod, res, (mod.HARD_PAD_KEEPOUT, mod.SOFT_PAD_VIA), "真实 C: lyg0927 U1",
             {mod.HARD_PAD_KEEPOUT: 4, mod.SOFT_PAD_VIA: 2})
-    # 出界：esp32 J1 全部 20 个 pad 越界（该件同时受静态过孔影响 ⇒ 只断言出界部分）
-    model = real.get("esp32s3r8n8")
-    judge, pl = _judge_model(mod, model)
-    res = judge.judge("J1", pl["J1"], {})
-    assert mod.OUT_OF_BOUNDS in res.reasons, f"esp32 J1 应出界，实际 {res.describe()}"
-    assert res.counts[mod.OUT_OF_BOUNDS] == 20, \
-        f"esp32 J1 越界 pad 数应为 20，实际 {res.counts.get(mod.OUT_OF_BOUNDS)}"
+    # 出界：原 `esp32s3r8n8 J1`（半孔排针，20 pad 越界）实例随该板移出数据集一并删除。
+    # ⚠️ 16 板源布局的 `out_of_bounds` 计数为 **0**（见 DOC_EXPECT_ALL）⇒ 出界的真实正例已不存在，
+    #    只能靠【构造用例】覆盖（`check_real_constructed_oob`：把件整体挪到板外 100mm）。
 
 
 def check_real_soft_s1_instance(mod: Any, real: RealData) -> None:
-    """软间距 S1：esp32 C54 ↔ L6（真实既存 0.030mm 窄缝）。"""
-    model = real.get("esp32s3r8n8")
+    """软间距 S1（真实既存窄缝）：见 `REAL_S1_INSTANCE`（板关键字 / 件 / 期望计数，vs 其余全部件）。"""
+    board_key, ref, want = REAL_S1_INSTANCE
+    model = real.get(board_key)
     judge, pl = _judge_model(mod, model)
-    res = judge.judge("C54", pl["C54"], {"L6": pl["L6"]})
-    _expect(mod, res, (mod.SOFT_PAD_PAD,), "真实 S1: C54×L6", {mod.SOFT_PAD_PAD: 1})
+    others = {r: p for r, p in pl.items() if r != ref}
+    res = judge.judge(ref, pl[ref], others)
+    got = res.counts.get(mod.SOFT_PAD_PAD, 0)
+    assert got == want, f"真实 S1: {board_key} {ref} 期望 {want}，实际 {got}（{res.describe()}）"
 
 
 def check_real_clean_footprints(mod: Any, real: RealData) -> None:
@@ -703,21 +699,26 @@ REAL_CHECKS_FAST: List[Tuple[str, Callable[[Any, RealData], None]]] = [
 ]
 
 
-# ---- 全量真实检查（慢：20 板） ----
+# ---- 全量真实检查（慢：16 板） ----
 
+# 2026-09-22：数据集 20 → 16 板后由 `scripts/dataset_report.py --full` 重测（旧值见台账 §0.4 历史）
 DOC_EXPECT_ALL: Dict[str, int] = {
     "hard.pad_pad": 4,
-    "hard.pad_via": 36,
+    "hard.pad_via": 8,
     "hard.pad_keepout": 4,
-    "soft.pad_pad": 5,
-    "soft.pad_via": 133,
+    "soft.pad_pad": 2,
+    "soft.pad_via": 68,
     "soft.pad_keepout": 0,
-    "out_of_bounds": 160,
+    "out_of_bounds": 0,
 }
+
+# 真实数据里的"软间距 S1 正例"：(板关键字, 件, 期望的 S1 计数)（2026-09-22 重测；
+# 原 `esp32s3r8n8 C54×L6` 随该板移出数据集）
+REAL_S1_INSTANCE: Tuple[str, str, int] = ("fei1554973967", "SC32", 2)
 
 
 def check_real_all_boards_match_doc(mod: Any, real: RealData) -> None:
-    """§0.4 全量回归：20 板源布局的 7 类计数必须与台账一致。"""
+    """§0.4 全量回归：16 板源布局的 7 类计数必须与台账一致。"""
     counts: Dict[str, int] = {}
     clean = dirty = 0
     for model in real.models():
@@ -734,7 +735,7 @@ def check_real_all_boards_match_doc(mod: Any, real: RealData) -> None:
                 clean += 1
     got = {r: counts.get(r, 0) for r in DOC_EXPECT_ALL}
     assert got == DOC_EXPECT_ALL, f"§0.4 不符：期望 {DOC_EXPECT_ALL}，实际 {got}"
-    assert (clean, dirty) == (777, 80), f"单件 clean/dirty 期望 (777, 80)，实际 {(clean, dirty)}"
+    assert (clean, dirty) == (629, 39), f"单件 clean/dirty 期望 (629, 39)，实际 {(clean, dirty)}"
 
 
 REAL_CHECKS_SLOW: List[Tuple[str, Callable[[Any, RealData], None]]] = [

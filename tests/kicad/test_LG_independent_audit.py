@@ -45,12 +45,11 @@ SCENARIOS = [
     dict(tag="jackt_IMU_U1", board_sub="jackt", drop=("U1",), comp="U1", over_golden=0),
     dict(tag="wzh_main_Q2", board_sub="wzh2814685", drop=("Q2", "Q1", "C1"), comp="Q2", over_golden=24),
     dict(tag="verysunshine_U4", board_sub="verysunshine", drop=("U9", "U4"), comp="U4", over_golden=0),
-    dict(tag="coloreasypico_D2", board_sub="coloreasypico2",
-         drop=("R2", "D2", "D3", "R8"), comp="D2", over_golden=40),
-]
+]    # 2026-09-22：`coloreasypico_D2` 场景随之被排除的板一并删除（该板已移入 data/bad_data/）
 IDS = [s["tag"] for s in SCENARIOS]
 
-# 20 板里的**全部 16 个非正交件**（金表；由 probe154 实测锁定）：(board_sub, ref, 原始角, 转换角 idx)
+# 16 板里的**全部 8 个非正交件**（金表；由 probe154 实测锁定；2026-09-22 排除 4 板后由 16 → 8）
+# (board_sub, ref, 原始角, 转换角 idx)
 NONORTH = [
     ("MiniMos", "U15", -45.0, 3),
     ("Mini控制板", "C13", -135.0, 2),
@@ -58,21 +57,13 @@ NONORTH = [
     ("Mini控制板", "U16", 45.0, 0),
     ("Mini控制板", "R36", -45.0, 3),
     ("Mini控制板", "SW1", 45.0, 0),
-    ("esp32s3r8n8", "C19", 135.0, 1),
-    ("esp32s3r8n8", "C50", -135.0, 2),
-    ("esp32s3r8n8", "L6", 45.0, 0),
-    ("esp32s3r8n8", "U3", -45.0, 3),
-    ("esp32s3r8n8", "C47", 135.0, 1),
-    ("esp32s3r8n8", "L4", -45.0, 3),
-    ("gd32vw553", "C55", -45.0, 3),
-    ("gd32vw553", "U1", -135.0, 2),
     ("lyg0927", "X1", -0.6172, 0),      # 全数据集唯一"非等距"角（-0.6172°，不是 -0.62）
     ("lyg0927", "U1", -45.0, 3),
 ]
 
 # 旋转专项的"待放件本身是非正交件"场面（drop = 该件 ∪ pad 数最多的 3 件；不够再退到 8 件）
 ROT_SCENES = [("Mini控制板", "U14"), ("Mini控制板", "SW1"),
-              ("gd32vw553", "U1"), ("lyg0927", "X1"), ("lyg0927", "U1")]
+              ("lyg0927", "X1"), ("lyg0927", "U1")]
 
 
 # ========================= 独立几何（= 定义，不复用被测代码） =========================

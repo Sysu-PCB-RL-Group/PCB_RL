@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""验收脚本：用 20 块板跑新的转换数据模型，逐项对照《导入信息重构》的目标数字。
+"""验收脚本：用 16 块板跑新的转换数据模型，逐项对照《导入信息重构》的目标数字。
 
 用法：
     set KICAD_PATH=E:\\Kicad
@@ -27,16 +27,16 @@ from utils.kicad_utils.pcb_model import (  # noqa: E402
 
 # 目标数字（docs/讨论结果/导入信息重构.md §0.1 / §1.1 / §2 / probe77）
 EXPECTED = {
-    "footprint": 857,
+    "footprint": 668,
     "zero_pad_footprint": 1,
-    "footprint_synthetic_ref": 25,   # 参考号为空、由我们合成 `@<库名>` 的匿名封装（EasyEDA 独立焊盘）
-    "pad": 3780,
-    "pad_net0": 619,
+    "footprint_synthetic_ref": 23,   # 参考号为空、由我们合成 `@<库名>` 的匿名封装（EasyEDA 独立焊盘）
+    "pad": 2648,
+    "pad_net0": 382,
     "pad_negative_annular": 28,
-    "via": 3422,
+    "via": 2800,
     "via_net0": 24,
-    "keepout": 46,
-    "keepout_slot": 45,
+    "keepout": 40,
+    "keepout_slot": 39,
     "keepout_hull": 1,
     "standalone_pads": 0,
     # 语义闸门（§1.4 层 ∈ {F}/{B}/{F,B}；ref 必须板内唯一）
@@ -192,8 +192,8 @@ def main() -> int:
             failed.append(f"rotation {deg}° → {got}, want {want}")
         print(f"  [{flag}] {deg:7.2f}° → {got} ({got * 90}°)  want {want}")
 
-    if len(non_orth) != 16:
-        failed.append(f"非正交原件数 got {len(non_orth)}, want 16")
+    if len(non_orth) != 8:
+        failed.append(f"非正交原件数 got {len(non_orth)}, want 8")
     if pads_in_nets != pads_with_net:
         failed.append(f"net→pad 覆盖不一致：net 内 {pads_in_nets} ≠ 有 net 的 pad {pads_with_net}")
     if empty_nets:

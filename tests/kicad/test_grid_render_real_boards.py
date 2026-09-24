@@ -98,15 +98,6 @@ SCENARIOS = [
         cell_mm=(0.3007, 0.1673),
         source_legal=False,                       # ⚠️ 专家源位姿本身违规（soft.pad_via×1）
     ),
-    dict(
-        tag="coloreasypico_D2",
-        board_sub="coloreasypico2",
-        drop=("R2", "D2", "D3", "R8"),
-        comp="D2",
-        counts=(10820, 9063, 10639, 9218),        # 含 _EPS 保守项（障碍阈值平局：5 格）
-        cell_mm=(0.2550, 0.1050),
-        source_legal=True,
-    ),
 ]
 IDS = [s["tag"] for s in SCENARIOS]
 
@@ -324,7 +315,6 @@ EXPERT_G_GOLDEN = {          # probe130/142 实测（0.7:0.3；专家格 = 源�
     "jackt_IMU_U1": 0.2005,         # 修补前 0.1863
     "wzh_main_Q2": 0.9366,
     "verysunshine_U4": 0.8230,      # ⚠️ 源位姿非法 ⇒ 代理格
-    "coloreasypico_D2": 0.9821,
 }
 
 
@@ -542,3 +532,53 @@ def test_degenerate_guard_empty_board(scenes):
     fin = np.isfinite(G)
     assert fin.any() and np.allclose(G[fin], 0.5), "退化时合法格 G 必须恒为 0.5"
     assert bool(np.isneginf(G[~fin]).all())
+
+
+# ===================== H. 回归：空板首步的"自 net"路径 =====================
+
+
+def test_gain_maps_self_net_first_step_float_dtype(all_kicad_pcb_paths):
+    """**回归（2026-09-19 实测崩过）**：空板 + 该件【在某条非电源 net 上有 ≥2 个 pad】时，
+    `dispersion_delta` 的 `const_ctrs` 为空 ⇒ `sum([])` 返回 **int 0** ⇒ `sx/sy/ss` 退化成 int64
+    ⇒ `sx += cxn`（float64）抛 `Cannot cast ufunc 'add' output ... int64`。
+
+    既有用例 `test_degenerate_guard_empty_board` 用的是 `lr1388_U7`（无"自 net"）⇒ 走的是
+    `n_after == 0 ⇒ continue` 的早退分支，**恰好掩盖了这条路径**。
+
+    顺带钉住语义：这种"自 net"步里，参与 σ 的 net 中心**全部随件平动** ⇒ 同一旋转内
+    `Δσ` 必为**常量**（即该步对"放在哪"没有位置信号 —— 与 §7.3/§0.6 l 的口径一致）。
+    """
+    pcb_model = _real_pcb_model()
+    hit = None
+    for path in all_kicad_pcb_paths:
+        model = pcb_model.build_model(pcb_model.pcbnew.LoadBoard(path), path)
+        spec = gr.grid_spec(model, m=gr.GRID_M)
+        for comp in model.footprints:
+            cnt: dict = {}
+            for p in comp.pads:
+                if p.net_id is None or not p.local_aabb:
+                    continue
+                net = model.nets.get(p.net_id)
+                if net is None or net.is_power:
+                    continue
+                cnt[p.net_id] = cnt.get(p.net_id, 0) + 1
+            if any(v >= 2 for v in cnt.values()):
+                hit = (os.path.basename(os.path.dirname(path)), comp.ref, model, comp, spec)
+                break
+        if hit:
+            break
+    assert hit is not None, "样本为空（纪律 2）：全数据集找不到「自 net ≥2 pad」的件"
+
+    sub, ref, model, comp, spec = hit
+    G, _degen = gr.gain_maps(model, (), comp, spec)      # ← 修复前：这里直接抛 casting 错误
+    L = gr.legal_masks(model, (), comp, spec, keepouts=pcb_model.state_keepouts(model, ()))
+    assert bool(L.any()), f"{sub}/{ref}: 空板首步应有合法格（样本为空，纪律 2）"
+    assert bool(np.isfinite(G[L]).all()), f"{sub}/{ref}: 合法格上 G 必须有限"
+    assert bool(np.isneginf(G[~L]).all()), f"{sub}/{ref}: 非法格上 G 必须 −inf"
+
+    DS = gr.dispersion_delta(model, (), comp, spec, L)
+    for k in range(4):
+        v = DS[k][L[k]]
+        if len(v):
+            assert float(v.max() - v.min()) < 1e-9, \
+                f"{sub}/{ref}: k={k} 的「自 net」步 Δσ 应为常量（无位置信号），实测跨度 {v.max() - v.min():.3e}"

@@ -305,6 +305,19 @@ class Footprint:
         idx = self.rotation_index if rotation_index is None else rotation_index
         return rotate_aabb(self.local_hull_aabb, idx * 90.0, self.anchor)
 
+    @property
+    def local_hull_area(self) -> float:
+        """**件面积的单点定义**：θ=0 局部 hull AABB 的面积（mm²）。
+
+        用 **θ=0 局部**（不是"当前位姿的 AABB"）是刻意的：该量只依赖件本身
+        ⇒ 与位姿、与"当前局面"**全都无关**（口径唯一）。
+        （注：4 个旋转只有 90° 倍数 ⇒ hull AABB 只是宽高互换 ⇒ 两者的**面积数值本就相等**，
+        差别在于"θ=0 局部"是单一事实来源。）
+        消费方：`env/order_plan` 的面积权重/tie-break、`env/completion` 的面积占比（§0.6 m）。
+        """
+        x0, y0, x1, y1 = self.local_hull_aabb
+        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
     def pad_aabb_at(self, pad: Pad, rotation_index: Optional[int] = None) -> AABB:
         """按转换角计算某个 pad 的板坐标 AABB（θ 为 90° 倍数时精确）。"""
         idx = self.rotation_index if rotation_index is None else rotation_index

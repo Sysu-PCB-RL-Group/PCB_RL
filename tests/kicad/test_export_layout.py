@@ -1,12 +1,65 @@
 """真实 KiCad export_layout 集成测试。
 
 验证导出后的 .kicad_pcb 可被重新加载，元件位置/旋转/层变更正确。
+
+⚠️ **不要用"字节相同"判定"两次导出等价"**（probe210，2026-09-22）：
+`export_layout` 的产物有**两处合法的、每次都不同的东西** ——
+① `(uuid …)` **每次导出都重新生成**；② footprint **块的顺序不稳定**（疑为对 SWIG 对象集合迭代）。
+⇒ 字节比对**恒失败**，且失败**不代表**"缓存被污染"。要判定等价，请用本文件下方的
+`_footprint_records()`（件级 `ref → (layer, at)`，与块序/uuid 无关）+ `_lines_without_uuid()`（行级多重集）。
 """
 
 import os
+import re
 import tempfile
 import pytest
 from utils.kicad_utils.kicad_utils import KiCadUtils
+
+
+# ---- 规范化解析：判决"两次导出内容等价"（与块顺序、uuid 无关） ----
+
+_FP_START = re.compile(r"^\t\(footprint\b")
+_FP_LAYER = re.compile(r'^\t\t\(layer "([^"]+)"\)\s*$')
+_FP_AT = re.compile(r"^\t\t\(at ([-\d.]+) ([-\d.]+)(?: ([-\d.]+))?\)\s*$")
+_FP_REF = re.compile(r'\(property "Reference" "([^"]+)"')
+
+
+def _footprint_records(pcb_path):
+    """把 `.kicad_pcb` 解析成 `{ref: (layer, x, y, rot)}`（**丢掉 uuid**、与块顺序无关）。"""
+    out, cur = {}, None
+    with open(pcb_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            ln = raw.rstrip("\r\n")
+            if _FP_START.match(ln):
+                if cur and cur["ref"]:
+                    out[cur["ref"]] = (cur["layer"], cur["at"])
+                cur = {"layer": None, "at": None, "ref": None}
+                continue
+            if cur is None:
+                continue
+            if cur["ref"] is None:
+                m = _FP_REF.search(ln)
+                if m:
+                    cur["ref"] = m.group(1)
+                    continue
+            if cur["layer"] is None:
+                m = _FP_LAYER.match(ln)
+                if m:
+                    cur["layer"] = m.group(1)
+                    continue
+            if cur["at"] is None:
+                m = _FP_AT.match(ln)
+                if m:
+                    cur["at"] = (float(m.group(1)), float(m.group(2)), float(m.group(3) or 0.0))
+    if cur and cur["ref"]:
+        out[cur["ref"]] = (cur["layer"], cur["at"])
+    return out
+
+
+def _lines_without_uuid(pcb_path):
+    """去掉 `(uuid …)` 后的**排序行多重集**（块序无关；用于抓"除 uuid/块序外"的任何内容差异）。"""
+    with open(pcb_path, "r", encoding="utf-8") as fh:
+        return sorted(ln.rstrip("\r\n") for ln in fh if "(uuid" not in ln)
 
 
 @pytest.mark.require_kicad
@@ -115,9 +168,47 @@ class TestExportLayout:
             )
             assert abs(hcy - orig_cy) < 0.05
 
-            # 两次导出确定性一致（相同输入恒得相同输出）
-            with open(p1, "rb") as f1, open(p2, "rb") as f2:
-                assert f1.read() == f2.read(), "多次导出应互不污染、输出一致"
+            # 两次导出**内容等价**（不是"字节相同"：uuid 每次重生成、footprint 块顺序不稳定，
+            # 见文件头说明与 probe210；用规范化比较才是在守"互不污染"这个真意图）
+            r1, r2 = _footprint_records(p1), _footprint_records(p2)
+            assert len(r1) == len(ki.footprints) == len(r2), (
+                f"解析出的件数应等于板上件数：{len(r1)} / {len(ki.footprints)} / {len(r2)}")
+            bad = {k: (r1.get(k), r2.get(k)) for k in set(r1) | set(r2) if r1.get(k) != r2.get(k)}
+            assert not bad, f"两次导出的件级内容不一致（真污染）：{bad}"
+            s1, s2 = _lines_without_uuid(p1), _lines_without_uuid(p2)
+            assert s1 == s2, ("去掉 uuid 后仍有行级差异（除块顺序外不该有）："
+                              f"{[(a, b) for a, b in zip(s1, s2) if a != b][:5]}")
+
+    def test_canonical_compare_has_discriminating_power(self, kicad_pcb_path):
+        """**判别力守门**（纪律：断言不能是"永不失败的"）：规范化比较必须能抓到**真差异**。
+
+        做法：同一块板导出两次，第二次把同一个件的 bbox 再挪 (+5, 0) ⇒ 两次的件级记录里
+        **只有该件不同、其余件全部相同**（若 `_footprint_records` 解析失效或比对退回"恒真"，本条会红）。
+        """
+        ki = KiCadUtils()
+        ki.load_board(kicad_pcb_path)
+        movable = [(ref, c) for ref, c in ki.components.items() if not c.is_fixed]
+        if not movable:
+            pytest.skip("No movable components to test")
+        ref, comp = movable[0]
+        orig = tuple(comp.bbox)
+        comp.is_placed = True
+        comp.layer = 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p1 = os.path.join(tmpdir, "x.kicad_pcb")
+            p2 = os.path.join(tmpdir, "y.kicad_pcb")
+            comp.bbox = (orig[0] + 10, orig[1], orig[2] + 10, orig[3])
+            assert ki.export_layout(p1, ki.components)
+            comp.bbox = (orig[0] + 15, orig[1], orig[2] + 15, orig[3])
+            assert ki.export_layout(p2, ki.components)
+
+            r1, r2 = _footprint_records(p1), _footprint_records(p2)   # 必须在临时目录仍存在时读
+            assert r1 and set(r1) == set(r2)
+            diff = {k for k in r1 if r1[k] != r2[k]}
+            assert diff == {ref}, f"应只有 {ref} 变（实得 {sorted(diff)}）⇒ 解析器或比对失效"
+            # 其余件（含固定件与有旋转的件）必须逐位相同 ⇒ 解析器覆盖到了 rot 与 layer
+            assert all(r1[k][0] is not None and r1[k][1] is not None for k in r1), "有件没解析出 layer/at"
 
     def test_export_does_not_lose_fixed_components(self, kicad_pcb_path):
         """导出不应丢失固定元件。"""

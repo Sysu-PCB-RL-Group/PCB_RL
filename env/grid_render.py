@@ -46,7 +46,8 @@ from typing import Mapping, NamedTuple, Optional, Sequence, Tuple
 import numpy as np
 
 from env.violations import Pose, pose_of
-from utils.kicad_utils.pcb_model import AABB, Footprint, PcbModel, rotate_aabb, state_keepouts
+from utils.kicad_utils.pcb_model import (AABB, Footprint, PcbModel, keepout_at,
+                                         rotate_aabb, state_keepouts)
 
 GRID_M = 200          # 画布边长（Owner 2026-09-16 拍案）
 SOFT_GAP_MM = 0.2     # 软间距阈值（= 硬∪软的合并阈值）
@@ -183,6 +184,11 @@ def legal_masks(model: PcbModel, placed: Sequence[Footprint], comp: Footprint,
     pad_obs, via_obs, _keeps, keep_by_layer = _obstacles(placed, model, comp, ks)
     va = model.board_outline.valid_area(0.0)
     out = np.zeros((4, m, m), dtype=bool)
+    # 【2026-09-23 新增】`comp` **自带的槽**：只从 `model.keepouts` 取（`ks` 里"未放置件的槽不在板上"
+    # ⇒ 拿不到 comp 自己的槽定义）；源位姿下的槽是**板坐标** ⇒ 用官方 `keepout_at(ko, comp, (0,0), k)`
+    # 挪到"相对锚点 + 旋转 k"（它内部先做"板坐标 → 局部"的**逆旋转** `board_to_local_aabb`，
+    # 漏这一步在源旋转 ≠ 0 的件上会算错 —— 2026-09-23 踩过一次）。
+    own_slots = [ko for ko in model.keepouts if ko.owner_ref == comp.ref]
 
     for k in range(4):
         diff = np.zeros((m + 1, m + 1), dtype=np.int32)
@@ -229,6 +235,24 @@ def legal_masks(model: PcbModel, placed: Sequence[Footprint], comp: Footprint,
                 Bk, _ = keep_by_layer[lay]
                 if len(Bk):
                     _add_rects(diff, *_rect_idx(Bk, cx, hx, cy, hy, soft, spec), m)
+
+        # ⑤ 【2026-09-23 新增】`comp` **自带的槽**（随件）↔ **已放件的 pad**
+        #    动机：原来只查"新件的 pad ↔ 已放件的槽"这一个方向 ⇒ 后放件带来的槽可能压住**先放件**的 pad，
+        #          而先放件不能再动（索引只增不减，§0.6 q-⑦）⇒ 事后无法补救。
+        #          实测：16 板里 2 块板出现（13 处 pad 级冲突：硬 9 / 软 4，全在 keepout 类）。
+        #    手法与上面三类障碍**完全一致**：跟"跟随物"（这里 = 槽）的半尺寸 + soft 间距，
+        #          把障碍（= 已放件的 pad）反向扩成"禁忌锚点矩形"，累加进**同一个 `diff`**
+        #          ⇒ `forbidden` / `out[k] = inb & ~forbidden` 两步一行都不用改。
+        #    成本：只有自带槽的件才进这个分支（16 板 668 件里 20 件 / 39 个槽 ⇒ 其余件零开销）。
+        for ko in own_slots:
+            # 源位姿槽（板坐标）→ 官方 helper 挪到"相对锚点 + 旋转 k"（含逆旋转，同 `lookahead._slots`）
+            sx1, sy1, sx2, sy2 = keepout_at(ko, comp, (0.0, 0.0), k).aabb
+            scx, shx = (sx1 + sx2) / 2.0, (sx2 - sx1) / 2.0
+            scy, shy = (sy1 + sy2) / 2.0, (sy2 - sy1) / 2.0
+            for lay in ko.layers:
+                Bk2, _ = pad_obs[lay]
+                if len(Bk2):
+                    _add_rects(diff, *_rect_idx(Bk2, scx, shx, scy, shy, soft, spec), m)
 
         forbidden = diff.cumsum(0).cumsum(1)[:m, :m] > 0
         out[k] = inb & ~forbidden
@@ -405,6 +429,24 @@ def _sigma_of_centers(pts) -> float:
     return math.sqrt(max(sum((p[0] - cx) ** 2 + (p[1] - cy) ** 2 for p in pts) / n, 0.0))
 
 
+def dispersion_of(model: PcbModel, placed: Sequence[Footprint]) -> float:
+    """`σ(placed)` = 当前局面的**绝对**跨 net 离散度（mm；与 `dispersion_delta` 同一口径）。
+
+    与 `dispersion_delta` 的分工：那个只回答"把某件放到**格中心**后 σ 变化多少"（返回 `4×m×m` 的表）；
+    本函数回答"**给定这组位姿**下 σ 是多少" —— 用于需要 **σ 曲线**的地方（如 β 离线表的 `σ_m`），
+    因为**专家/任意位姿不在格点上**，无法用格表反查。
+
+    口径（与判定/reward 同源）：非电源 net；连接点 = pad 中心（**按当前位姿**）；net 中心 = bbox 中心；
+    参与 net = 已放点数 ≥ 2；`σ = sqrt(mean|c|² − |mean c|²)`。
+
+    `placed` 必须是**本模型的位姿化克隆**（`pcb_model.place_at` 的产物），否则抛错（契约，§0.6 q-⑤）。
+    """
+    refs = {f.ref for f in placed}
+    cnt, rect = _net_state(model, refs, _pose_pad_index(model, placed))
+    return _sigma_of_centers([((r[0] + r[1]) / 2.0, (r[2] + r[3]) / 2.0)
+                              for n, r in rect.items() if cnt[n] >= 2])
+
+
 def dispersion_delta(model: PcbModel, placed: Sequence[Footprint], comp: Footprint,
                      spec: GridSpec, legal: np.ndarray) -> np.ndarray:
     """`Δσ[k][i][j] = σ_after − σ_before`（**G 的跨网络离散度分量**；未除对角线）。
@@ -446,9 +488,12 @@ def dispersion_delta(model: PcbModel, placed: Sequence[Footprint], comp: Footpri
 
         X = spec.x0 + (c[:, 0] + 0.5) * spec.cell_x
         Y = spec.y0 + (c[:, 1] + 0.5) * spec.cell_y
-        sx = np.full(len(X), sum(q[0] for q in const_ctrs))
-        sy = np.full(len(X), sum(q[1] for q in const_ctrs))
-        ss = np.full(len(X), sum(q[0] ** 2 + q[1] ** 2 for q in const_ctrs))
+        # ⚠️ 必须显式 float64：`const_ctrs` 为空时 `sum([])` 返回 **int 0** ⇒ 数组退化成 int64，
+        # 后面 `sx += cxn`（float64）会抛 `Cannot cast ufunc 'add' output ... int64`
+        # —— 而"空 const_ctrs"正是【空板 / episode 开头前几步】的情形（板上还没有 ≥2 点的 net）
+        sx = np.full(len(X), sum((q[0] for q in const_ctrs), 0.0), dtype=np.float64)
+        sy = np.full(len(X), sum((q[1] for q in const_ctrs), 0.0), dtype=np.float64)
+        ss = np.full(len(X), sum((q[0] ** 2 + q[1] ** 2 for q in const_ctrs), 0.0), dtype=np.float64)
         for n in touched:
             off = np.asarray(mine[n], dtype=np.float64)
             px = X[:, None] + off[None, :, 0]

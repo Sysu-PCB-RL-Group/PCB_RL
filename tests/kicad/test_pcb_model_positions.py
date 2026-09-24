@@ -250,9 +250,9 @@ class TestFootprintPosition:
                 finally:
                     fp.SetOrientationDegrees(saved)
 
-        assert n_fp == 857, f"footprint 数异常：{n_fp}（期望 857）"
+        assert n_fp == 668, f"footprint 数异常：{n_fp}（期望 668）"
         # 覆盖性：必须真的走过"非正交 → 转换角"这条分支（否则 tie 规则永远测不到）
-        assert non_orth_seen == 16, (
+        assert non_orth_seen == 8, (
             f"非正交原件数异常：{non_orth_seen}（期望 16）⇒ 转换角 tie 分支未被覆盖"
         )
         print(
@@ -358,7 +358,7 @@ class TestPadPosition:
                     finally:
                         fp.SetOrientationDegrees(saved)
 
-        assert n_pad == 3780, f"pad 数异常：{n_pad}（期望 3780）"
+        assert n_pad == 2648, f"pad 数异常：{n_pad}（期望 2648）"
         print(
             f"\n[pad] 校验 {n_pad} 个 × 4 角（{n_check} 组中心+AABB）；"
             f"中心最大误差 {worst_center:.6f} mm，AABB 最大误差 {worst_aabb:.6f} mm"
@@ -472,7 +472,7 @@ class TestViaPosition:
                 else:
                     seen[key] = mv
 
-        assert n == 3422, f"via 数异常：{n}（期望 3422）"
+        assert n == 2800, f"via 数异常：{n}（期望 2800）"
         print(
             f"\n[via] 校验 {n} 个：AABB 全部可由 中心±直径/2 唯一算出；最大误差 {worst:.9f} mm；"
             f"同参数叠放记录 {dup_groups} 组（合法）"

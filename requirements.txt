@@ -1,12 +1,21 @@
-# === Python 依赖（pip install -r requirements.txt） ===
-gymnasium>=1.0.0
-numpy>=1.24.0
-torch>=2.0.0
-matplotlib>=3.5.0
-pytest>=7.0.0
+# === 运行依赖（pip install -r requirements.txt） ===
+numpy>=2.0,<3
+matplotlib>=3.5
+gymnasium>=1.0
+torch>=2.0
 
-# === 系统依赖（需单独安装） ===
-# KiCad 10.0+（含 pcbnew Python API）
+# torch 建议装 CPU 版（本机实测 2.13.0+cpu）：
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# === 开发 / 测试（只跑 pytest 需要） ===
+pytest>=7
+
+# === 解释器（唯一正确） ===
+# conda 环境 pcb_rl_311（本机 E:\miniconda\envs\pcb_rl_311，Python 3.11）；入口 python main.py
+# 不要往 KiCad 自带的裸 python 里装 torch
+
+# === 可选：只有下面两件事需要本机装 KiCad 10.0+（含 pcbnew / wx） ===
+#   1) 重建模型缓存   python scripts/dump_models.py
+#   2) 读真实板的测试  pytest tests/kicad
+# 训练/推理不需要 KiCad：几何走 data/model_cache/*.pkl（随仓库）
 # 下载: https://www.kicad.org/download/
-# 设置环境变量 KICAD_PATH 指向安装目录
-# Python 版本需与 KiCad 内置 Python 匹配（通常 3.11+）

@@ -75,7 +75,7 @@ class TestModelInvariants:
             if "pid-jian-yi" in tag:
                 # §1.1 实测：PID 板 `H1`（m3 铜柱）在一个封装内有 7 个同号 `pad "1"`
                 pid_h1_seen = len(by_key.get(("H1", "1"), ()))
-        assert total == 3780, f"pad 总数异常：{total}（期望 3780）"
+        assert total == 2648, f"pad 总数异常：{total}（期望 2648）"
         assert pid_h1_seen == 7, (
             f"PID 板 H1 的同号 pad 数 = {pid_h1_seen}（期望 7，§1.1 实测）"
             f" ⇒ 索引丢件或数据异常"
@@ -119,4 +119,4 @@ class TestModelInvariants:
                 f"{tag}：pads 缓存不完整 {len(model.pads)} ≠ 各 footprint 之和 {expect}"
             )
             total += len(model.pads)
-        assert total == 3780, f"pad 总数异常：{total}（期望 3780）"
+        assert total == 2648, f"pad 总数异常：{total}（期望 2648）"

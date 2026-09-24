@@ -1,0 +1,231 @@
+{
+  "cache_version": 1,
+  "generated_at": "2026-09-22 21:47:20",
+  "n_boards": 16,
+  "boards": [
+    {
+      "cache_version": 1,
+      "board": "bliysfyt-night-light-af2cf507--Board2-f9911fd2",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\bliysfyt-night-light-af2cf507--Board2-f9911fd2\\bliysfyt-night-light-af2cf507--Board2-f9911fd2.kicad_pcb",
+      "source_sha1": "51f7436807734da42d7674d6fbf17885583a90cb",
+      "dumped_at": "2026-09-22 21:47:18",
+      "counts": {
+        "footprints": 11,
+        "pads": 43,
+        "vias": 16,
+        "keepouts": 2,
+        "nets": 9
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "climbsnail-spotwelder-45c7d2f7--MiniMos板切分-f02d78a5",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\climbsnail-spotwelder-45c7d2f7--MiniMos板切分-f02d78a5\\climbsnail-spotwelder-45c7d2f7--MiniMos板切分-f02d78a5.kicad_pcb",
+      "source_sha1": "8795c3374de29f9b8f07aff4a5f23845f51ed81e",
+      "dumped_at": "2026-09-22 21:47:18",
+      "counts": {
+        "footprints": 24,
+        "pads": 111,
+        "vias": 353,
+        "keepouts": 0,
+        "nets": 16
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "climbsnail-spotwelder-45c7d2f7--Mini控制板切分-b0eefa2f",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\climbsnail-spotwelder-45c7d2f7--Mini控制板切分-b0eefa2f\\climbsnail-spotwelder-45c7d2f7--Mini控制板切分-b0eefa2f.kicad_pcb",
+      "source_sha1": "1c4c13b8a24da5892013b58bfdc23ab444f1deda",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 84,
+        "pads": 285,
+        "vias": 271,
+        "keepouts": 4,
+        "nets": 60
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "eda_uahyxtbgs-165w-three-way-multi-protocol-fa-dc91a91e--300W四路彩屏桌面电源（彩屏版）-56ddf4ed",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\eda_uahyxtbgs-165w-three-way-multi-protocol-fa-dc91a91e--300W四路彩屏桌面电源（彩屏版）-56ddf4ed\\eda_uahyxtbgs-165w-three-way-multi-protocol-fa-dc91a91e--300W四路彩屏桌面电源（彩屏版）-56ddf4ed.kicad_pcb",
+      "source_sha1": "3e04da4442c265d46af03754d4408338ac57a163",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 97,
+        "pads": 381,
+        "vias": 249,
+        "keepouts": 9,
+        "nets": 60
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "elisaday-high-color-value-low-cost-reflow-24a201e4--LCD转接板-956a8225",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\elisaday-high-color-value-low-cost-reflow-24a201e4--LCD转接板-956a8225\\elisaday-high-color-value-low-cost-reflow-24a201e4--LCD转接板-956a8225.kicad_pcb",
+      "source_sha1": "31f13696e1bc446506ccbf9751bb616565eb77fb",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 10,
+        "pads": 36,
+        "vias": 4,
+        "keepouts": 0,
+        "nets": 11
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "esp-college-project_bkymsryt-aeef78a5--ShuttleBoard-BMI270&BMM350-V1_2-b0ba0089",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\esp-college-project_bkymsryt-aeef78a5--ShuttleBoard-BMI270&BMM350-V1_2-b0ba0089\\esp-college-project_bkymsryt-aeef78a5--ShuttleBoard-BMI270&BMM350-V1_2-b0ba0089.kicad_pcb",
+      "source_sha1": "b6cff4f735573dcf056310efc9e82059c95d4d02",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 21,
+        "pads": 83,
+        "vias": 51,
+        "keepouts": 0,
+        "nets": 14
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "fei1554973967-sw3538-dff8db20--底板带串口-a82dd2f4",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\fei1554973967-sw3538-dff8db20--底板带串口-a82dd2f4\\fei1554973967-sw3538-dff8db20--底板带串口-a82dd2f4.kicad_pcb",
+      "source_sha1": "eea280a2a5a7489ab00d367a1673c65e2ea3fcd4",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 78,
+        "pads": 266,
+        "vias": 47,
+        "keepouts": 2,
+        "nets": 43
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "iamdt-guang-chui-60-40a2c53b--主板v1(不建议用于新复刻)-385a2a21",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\iamdt-guang-chui-60-40a2c53b--主板v1(不建议用于新复刻)-385a2a21\\iamdt-guang-chui-60-40a2c53b--主板v1(不建议用于新复刻)-385a2a21.kicad_pcb",
+      "source_sha1": "1f7a94013444ef61c469c4bedd6a77ba6b030abd",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 86,
+        "pads": 307,
+        "vias": 374,
+        "keepouts": 2,
+        "nets": 61
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "jackt-tong-yong-xiao-che-kong-zhi-qi-zhuan-li-948f377a--4.IMU小板v1_1-09db0370",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\jackt-tong-yong-xiao-che-kong-zhi-qi-zhuan-li-948f377a--4.IMU小板v1_1-09db0370\\jackt-tong-yong-xiao-che-kong-zhi-qi-zhuan-li-948f377a--4.IMU小板v1_1-09db0370.kicad_pcb",
+      "source_sha1": "2506a362b5c9ad5b3db10d37587806e789bb0c93",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 10,
+        "pads": 52,
+        "vias": 37,
+        "keepouts": 0,
+        "nets": 11
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "li-chuang-kai-fa-ban-pid-jian-yi-ru-men-tao-jian-c5ce5a79--V1.0.0-94ebd22e",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\li-chuang-kai-fa-ban-pid-jian-yi-ru-men-tao-jian-c5ce5a79--V1.0.0-94ebd22e\\li-chuang-kai-fa-ban-pid-jian-yi-ru-men-tao-jian-c5ce5a79--V1.0.0-94ebd22e.kicad_pcb",
+      "source_sha1": "fffb7674dd1ff00323bae8828546ecaab06395d8",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 14,
+        "pads": 149,
+        "vias": 0,
+        "keepouts": 1,
+        "nets": 15
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "lr1388-esp32-camera-photometer-7ba3d19c--2感光板-63aa5ecd",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\lr1388-esp32-camera-photometer-7ba3d19c--2感光板-63aa5ecd\\lr1388-esp32-camera-photometer-7ba3d19c--2感光板-63aa5ecd.kicad_pcb",
+      "source_sha1": "75a0032d3260b0e98b4b76d652b2f15bf68ac44a",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 36,
+        "pads": 131,
+        "vias": 51,
+        "keepouts": 4,
+        "nets": 25
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "lyg0927-cyberwand-stm32-convolutional-ne-ac55f5c2--Main-52a399c5",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\lyg0927-cyberwand-stm32-convolutional-ne-ac55f5c2--Main-52a399c5\\lyg0927-cyberwand-stm32-convolutional-ne-ac55f5c2--Main-52a399c5.kicad_pcb",
+      "source_sha1": "271b1653d1eee75a123a6c6f97f1d665b65f51e3",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 60,
+        "pads": 243,
+        "vias": 84,
+        "keepouts": 8,
+        "nets": 51
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "realtix-sakura_nfc-d968f2f9--执行器-18c91766",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\realtix-sakura_nfc-d968f2f9--执行器-18c91766\\realtix-sakura_nfc-d968f2f9--执行器-18c91766.kicad_pcb",
+      "source_sha1": "1d485e94a16dde554585bdca510201f520db539f",
+      "dumped_at": "2026-09-22 21:47:19",
+      "counts": {
+        "footprints": 17,
+        "pads": 71,
+        "vias": 29,
+        "keepouts": 2,
+        "nets": 26
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "travellium-12v-desktop-power-supply-cc8d8467--Z作废留念-MK9218-29253164",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\travellium-12v-desktop-power-supply-cc8d8467--Z作废留念-MK9218-29253164\\travellium-12v-desktop-power-supply-cc8d8467--Z作废留念-MK9218-29253164.kicad_pcb",
+      "source_sha1": "d06db1df54b333e808beb39600612894b36173c3",
+      "dumped_at": "2026-09-22 21:47:20",
+      "counts": {
+        "footprints": 43,
+        "pads": 125,
+        "vias": 1024,
+        "keepouts": 0,
+        "nets": 23
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "verysunshine-34e06a1e8bfa4ca7a126286b764d3f7b-42c390bd",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\verysunshine-34e06a1e8bfa4ca7a126286b764d3f7b-42c390bd\\verysunshine-34e06a1e8bfa4ca7a126286b764d3f7b-42c390bd.kicad_pcb",
+      "source_sha1": "a0632d65e270fe7f976a51bf6070671e778a73fe",
+      "dumped_at": "2026-09-22 21:47:20",
+      "counts": {
+        "footprints": 39,
+        "pads": 180,
+        "vias": 125,
+        "keepouts": 4,
+        "nets": 42
+      }
+    },
+    {
+      "cache_version": 1,
+      "board": "wzh2814685-voltpen_v0-5-3f4d7379--主控板-5bd81944",
+      "source": "E:\\PCB_AI\\PCB_RL\\data\\kicad-native-batch\\wzh2814685-voltpen_v0-5-3f4d7379--主控板-5bd81944\\wzh2814685-voltpen_v0-5-3f4d7379--主控板-5bd81944.kicad_pcb",
+      "source_sha1": "eaa84bdf91a9d05186920172ce5bd80d842c59c5",
+      "dumped_at": "2026-09-22 21:47:20",
+      "counts": {
+        "footprints": 38,
+        "pads": 185,
+        "vias": 85,
+        "keepouts": 2,
+        "nets": 39
+      }
+    }
+  ]
+}

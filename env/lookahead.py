@@ -127,16 +127,25 @@ def killed_rects(model: PcbModel, comp_now: Footprint, k: int,
                  comp_next: Footprint, kf: int, px: float, py: float) -> np.ndarray:
     """`comp_now` 放 `(k,px,py)` 后，`comp_next`（旋转 kf）锚点被禁的矩形集合。
 
-    三组：`now.pad ↔ next.pad`、`now.slot ↔ next.pad`、`now.pad ↔ next.slot`。
+    三组：`now.pad ↔ next.pad`、`now.slot ↔ next.pad`、`now.pad ↔ next.slot`
+    （**第三组 2026-09-23 才补上**：此前缺失 ⇒ 增量比 `legal_masks` 偏松，见下面注释）。
     """
     an, am = _pads(comp_now, k)
     asl, asm = _slots(comp_now, model, k)
     bn, bm = _pads(comp_next, kf)
-    # ⚠️ **不包含** `now.pad ↔ next.slot`：口径 (A) 下 `comp_next` 尚未放置 ⇒ 它的槽不在板上；
-    #    且 `comp_next` 自己的合法格本就**豁免自家槽**（§2.4）⇒ 该对与"next 是否还有位置"无关
-    #    （保留它会让增量比真实 `L_next(after)` 更严，破坏"增量 == 从零重算"，§0.6 p）。
+    bsl, bsm = _slots(comp_next, model, kf)
+    # 三组（**第三组是 2026-09-23 补的**：`legal_masks` 改成双向后，这里必须对齐）：
+    #   `now.pad ↔ next.pad`（硬/软重叠）｜`now.slot ↔ next.pad`｜**`now.pad ↔ next.slot`**
+    # ⚠️ 第三组为什么必须有：`comp_next` **落子那一刻**它的槽就跟着上板，可能压住**已在板上**的
+    #    `comp_now` 的 pad，而 `comp_now` 不能再动（索引只增不减，§0.6 q-⑦）⇒ 事后无法补救。
+    #    这里旧版漏了它、理由写成"next 尚未放置 ⇒ 其槽不在板上"——**这个理由不成立**：
+    #    §2.4/§0.6 p 排除的是"**next 自己的 pad ↔ next 自己的槽**"（owner 豁免），
+    #    不是"next 的槽 ↔ **已在板上** 的 pad"。漏掉 ⇒ 增量比真实 `L_next(after)` **偏松**，
+    #    与 `legal_masks`（现已双向）不一致 ⇒ 由
+    #    `tests/kicad/test_slot_semantics.py::test_increment_equals_recompute_with_slots` 守门。
     parts = [_rects(an, am, bn, bm, px, py),
-             _rects(asl, asm, bn, bm, px, py)]
+             _rects(asl, asm, bn, bm, px, py),
+             _rects(an, am, bsl, bsm, px, py)]
     parts = [x for x in parts if len(x)]
     return np.concatenate(parts, axis=0) if parts else np.zeros((0, 4))
 
