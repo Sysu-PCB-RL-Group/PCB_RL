@@ -3,9 +3,9 @@
 直接使用真实 pcbnew API（不经过 Mock）。
 所有 fixture 在 KICAD_PATH 未设置时自动 skip。
 
-注意：mock 测试（tests/ 根目录）先运行时会将 MockKiCadUtils 注入
-sys.modules["utils.kicad_utils"]，进而污染 env.* 模块的导入缓存。
-此处通过清除缓存模块和强制重载，确保真实 KiCad 代码加载。
+历史防御（2026-09-18 后已无 mock 测试，保留以防回归）：上一代 `tests/` 根目录的
+mock 测试曾把 `MockKiCadUtils` 注入 sys.modules["utils.kicad_utils"]，进而污染
+env.* 模块的导入缓存。此处仍在导入期清除这些缓存，确保真实 KiCad 代码加载。
 """
 
 import os
@@ -13,16 +13,16 @@ import sys
 import pytest
 
 
-# ---- 清除 mock 测试污染的模块缓存，确保 env 模块加载真实 KiCadUtils ----
+# ---- 历史防御：清除上一代 mock 测试可能污染的模块缓存（现已无 mock 测试） ----
 def _clean_mock_cache():
-    """删除可能在 mock 测试中被污染缓存的模块，让真实 KiCad 测试重新加载。"""
+    """清除可能被 mock 污染的模块缓存，让真实 KiCad 测试重新加载（历史防御，保留）。"""
     polluted = [k for k in list(sys.modules.keys()) if k.startswith("env.")]
     for key in polluted:
         del sys.modules[key]
-    # 同时清除 kicad_utils（可能被 mock 注入）
+    # 同时清除 kicad_utils（历史上可能被 mock 注入）
     if "utils.kicad_utils" in sys.modules:
         del sys.modules["utils.kicad_utils"]
-    # 清理 utils 上的 mock 属性引用
+    # 清理 utils 上可能残留的 mock 属性引用
     import utils  # noqa: E402
     if hasattr(utils, "kicad_utils"):
         delattr(utils, "kicad_utils")
@@ -114,7 +114,7 @@ def boards_with_models(all_kicad_pcb_paths):
 
 @pytest.fixture(scope="session")
 def all_kicad_pcb_paths():
-    """返回 data/kicad-native-batch 下**全部**真实 .kicad_pcb（默认 20 块）。
+    """返回 data/kicad-native-batch 下**全部**真实 .kicad_pcb（现行 16 块；另 4 块在 data/bad_data）。
 
     与 `kicad_pcb_path`（只取最小一块）相对：用于需要"全量真实数据"的回归测试。
     可用环境变量 `PCB_RL_TEST_MAX_BOARDS` 限制数量（调试用），默认不限制。

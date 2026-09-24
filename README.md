@@ -1,208 +1,31 @@
 # PCB_RL
 
-<!-- STALE-BANNER -->
-> ⚠️ **上一代文档（已作废，仅作历史记录/对照）**：本文描述的是重构前（≤2026-09-15）的架构 ——
-> 如 `MAX_MOVABLE` / `GRID_W` / `GRID_H` / `CELL_SIZE=0.2`、7 元动作 `(comp_id, x1,y1,x2,y2, rot, layer)`、
-> 违规罚分式 reward、`SPEC v2.x` 等。
-> **现行口径一律以 [`docs/讨论结果/导入信息重构.md`](docs/讨论结果/导入信息重构.md) 为准**：动作 =（旋转 k, cell i, j）、L/G = 4×200×200、
-> 违规被 mask **禁止**（不罚分）、固定顺序不选件、开槽随件（未放置不在板上）。
+基于强化学习的 PCB 自动布局（Double DQN）。
 
-基于强化学习的 PCB 自动布局系统。
+> ⚠️ 本项目 **2026-09-22 起整体重构**：旧的 5 步动作栈（`env/pcb_layout_env.py` + `dqn/` +
+> `config/argument.txt` + `main.py/run.py/run_inference.py` 那套）**已废弃并删除**。
+> 本文以下内容全部是现行架构。
 
-## 目录结构
+## 先读这三份
 
-```
-PCB_RL/
-├── main.py                       # CLI 入口（训练入口）
-├── run.py                        # 训练循环（--with_expert 走 BC 预训练+专家注入，否则纯 RL baseline）
-├── run_inference.py              # 推理脚本（支持单板 / 批量）
-├── requirements.txt
-├── config/
-│   └── argument.txt              # 超参数配置（含专家注入参数）
-├── data/
-│   ├── kicad-native-batch/       # 立创 EDA KiCad 项目（递归扫描 .kicad_pcb）
-│   │   ├── *.kicad_pcb           # PCB 布局文件（RL 读取的数据源）
-│   │   ├── *.kicad_sch           # 原理图
-│   │   └── *.kicad_pro           # KiCad 项目文件
-│   ├── expert_transitions/       # 专家 transition 缓存（自动生成，可复用）
-│   └── README.txt
-├── docs/                         # 文档 & SPEC
-├── dqn/                          # DQN 模块
-│   ├── __init__.py               # 导出 DQN / ReplayBuffer / ExpertReplayBuffer / DQNAgent
-│   ├── network.py                # 5-Head 自回归网络（共享 slot_encoder）
-│   ├── replay_buffer.py          # ReplayBuffer + ExpertReplayBuffer（专家常驻 + PER）
-│   └── agent.py                  # DQNAgent（epsilon-greedy + learn + learn_bc）
-├── env/                          # RL 环境
-│   ├── pcb_layout_env.py         # PCBLayoutEnv（自回归 5 步 Gymnasium Env）
-│   ├── pcb_utils.py              # 约束检测 & Reward 计算
-│   ├── mock_pcb.py               # Mock 合成数据（无需 KiCad，用于测试）
-│   └── expert_trajectory.py      # 专家轨迹生成（反向拆解 + 微量变异 → BC 预训练数据）
-├── utils/                        # 工具模块
-│   ├── kicad_utils/              # KiCad 解析 + 导出工具
-│   ├── pcb_scan.py               # PCB 文件扫描
-│   └── visualization.py          # matplotlib 布局可视化
-├── tests/                        # 测试套件（含 expert_trajectory 测试）
-│   ├── conftest.py               # Mock 测试 fixtures
-│   ├── test_dqn_pipeline.py      # DQN 全管线集成测试（20 ep）
-│   ├── test_expert_trajectory.py # 专家轨迹生成测试（8 用例）
-│   ├── test_pcb_utils.py         # 约束检测单测（26 用例）
-│   ├── test_env.py               # PCBLayoutEnv 单测（14 用例）
-│   ├── test_mock_pcb.py          # MockPCB 单测（13 用例）
-│   ├── test_network.py           # DQN 网络单测（7 用例）
-│   ├── test_replay_buffer.py     # ReplayBuffer 单测（8 用例）
-│   ├── test_agent.py             # DQNAgent 单测（8 用例）
-│   ├── test_visualization.py     # 可视化单测（6 用例）
-│   └── kicad/                    # 真实 KiCad 集成测试（17 用例，需 KICAD_PATH）
-└── output/                       # 推理输出
-    └── <pcb_name>/                # 每块 PCB 一个文件夹
-        ├── best_layout.kicad_pcb  # 布局优化后的 PCB 文件
-        ├── final_output.kicad_pcb # 最后一次尝试的布局
-        ├── step_01~N.png          # 每步放置过程图（--debug）
-        └── best_layout.png        # 最终布局可视化（--debug）
-```
+- **技术总览（新人从这里开始，约 300 行）**：[`docs/项目技术文档.md`](docs/项目技术文档.md)
+- **当前参数一览（现在到底配的是什么）**：[`PARAMS.md`](PARAMS.md)
+- **设计台账（唯一事实来源，2400+ 行，含每个数字的由来）**：[`docs/导入信息重构.md`](docs/导入信息重构.md)
 
-## 依赖
+（重构前的旧文档在 `docs/旧版结构文档/`，**已作废**，仅作历史对照。）
 
-- **KiCad 10.0+**（必装，用于解析 .kicad_pcb）
-- Python 3.11+（需与 KiCad 内置 Python 版本匹配）
-- PyTorch + Gymnasium + NumPy + Matplotlib
-- 设置环境变量 `KICAD_PATH` 指向 KiCad 安装目录
-- 见 `requirements.txt`
-
-## 数据
-
-数据源：`data/kicad-native-batch/`（立创 EDA 导出的真实 KiCad 项目，递归扫描 `.kicad_pcb`）。
-
-> 自 2026-08-01 起，**统一只使用「开关小板」**（`ran-pang-airlink-86231b34--开关小板-883285b3`，FP=6 / Net=3 / grid 36×36，CELL_SIZE=0.2mm）作为唯一训练与推理板，简单可控、便于快速迭代；其余板暂未纳入训练。
-
-每个 PCB 包含：元件列表、网络连接、板框（Edge.Cuts 层）、走线 + 敷铜（导出时全部保留）。
-
-## 训练
-
-训练有两种可选模式（由 `main.py --with_expert` 切换；**默认 = baseline 纯 RL**）：
-
-- **baseline（纯 RL，默认）**：不加 `--with_expert`，标准 DQN 训练，无 BC 预训练、无专家注入，使用普通 `ReplayBuffer`（容量 REPLAY_BUFFER_SIZE=100000，纯探索环形）。
-- **with_expert（专家组）**：加 `--with_expert`，先 BC 预训练再用 `ExpertReplayBuffer` 注入专家经验（见下两阶段）。
-
-### Phase 1：BC 预训练（仅 with_expert 模式）
-
-利用 KiCad 源数据自带的「完美布局」生成专家轨迹：
-1. **反向拆解**：从完整布局逐件拆除（先拆小、后拆大），反转得到正向完美轨迹
-2. **微量变异**：20% 概率位置 ±2 格 / 10% 概率旋转（全 4 种旋转），增加轨迹多样性
-3. **纯监督学习**：用专家 transition 训练网络 50 epoch（交叉熵损失）
-
-### Phase 2：RL 训练 + 专家注入（仅 with_expert 模式）
-
-1. 加载 BC 预训练权重作为初始化
-2. 正常 DQN 训练，ε=0.6→0.1 指数衰减（10000 ep）
-3. 专家组 buffer 总容量 = EXPERT_TOTAL_BUFFER（100000）：专家常驻区 = EXPERT_TOTAL_TRANSITIONS（= 总buffer × EXPERT_BUFFER_RATIO = 70000）、探索区 = 30000；采样对整池均匀随机，专家占比≈70%（非每 batch 硬拆分）
-4. 优先级经验回放（PER）参数保留（α=0.6），但当前 sample 为整池均匀随机（is_weights=1.0，PER 暂未实际启用）
+## 最快跑起来
 
 ```powershell
-# Windows（PowerShell）
-$env:KICAD_PATH = "E:\Kicad"
+cd E:\PCB_AI\PCB_RL
 
-# 默认 = baseline（纯 RL，无 BC / 无专家注入）
-python main.py
-python main.py --total_episodes 10000
-
-# 专家组 = BC 预训练 + 专家注入（加 --with_expert）
-python main.py --with_expert
-python main.py --with_expert --total_episodes 10000
+& E:\miniconda\envs\pcb_rl_311\python.exe main.py train        # 训练（默认 1000 局 → output/，约 4.4 h）
+& E:\miniconda\envs\pcb_rl_311\python.exe main.py infer        # 推理（output/best.pt，16 板 → result/）
+& E:\miniconda\envs\pcb_rl_311\python.exe -m pytest tests -q   # 测试（340 passed / 13 skipped）
 ```
 
-```bash
-# macOS / Linux
-export KICAD_PATH="/path/to/kicad"
+`main.py train|infer` 的参数**原样透传**给 `scripts/train_dqn.py` / `scripts/infer_dqn.py`
+⇒ `python main.py train --help` 看全部选项。
 
-python main.py                  # baseline（默认）
-python main.py --with_expert   # 专家组
-```
-
-**专家 transition 生成（仅 with_expert 模式）**：若 `data/expert_transitions/` 缓存缺失或不足，则首次训练从 KiCad 源数据生成专家轨迹并缓存；已存在时直接加载，无需重新生成。
-
-**输出**：`result/best_model.pt`（全局最佳权重，两模式均有）、`result/bc_pretrained.pt`（BC 预训练权重，仅 with_expert）、每板 loss 曲线和布局导出。
-
-## 推理
-
-```powershell
-# Windows（PowerShell）
-$env:KICAD_PATH = "E:\Kicad"
-
-# 默认批量推理所有训练板（使用随机权重）
-python run_inference.py
-
-# 加载训练好的模型权重
-python run_inference.py --model result/best_model.pt
-
-# 加 --debug 输出步骤图 + 布局图 + JSON
-python run_inference.py --model result/best_model.pt --debug
-
-# 单板推理
-python run_inference.py --pcb data/kicad-native-batch/开关小板/开关小板.kicad_pcb --model result/best_model.pt
-
-# 限制搜索轮数（默认 500）
-python run_inference.py --max-attempts 100
-```
-
-```bash
-# macOS / Linux
-export KICAD_PATH="/path/to/kicad"
-
-python run_inference.py --model result/best_model.pt --debug
-```
-
-输出到 `output/<pcb_name>/`：
-
-| 文件 | 说明 | 默认生成 |
-|:---|:---|:---:|
-| `best_layout.kicad_pcb` | 搜索到的最佳布局（走线/敷铜/丝印/3D 全保留） | ✅ |
-| `final_output.kicad_pcb` | 最后一次尝试的布局 | ✅ |
-| `step_01~N.png` | 每步放置过程图 | `--debug` |
-| `best_layout.png` | 最终布局可视化 | `--debug` |
-| `best_layout_state.json` | 布局状态快照 | `--debug` |
-| `inference_log.txt` | 推理日志 | ✅ |
-
-## 训练流程说明
-
-- **Phase 1**（BC 预训练）：仅用专家 transition，50 epoch 纯监督学习
-- **Phase 2**（RL）：ε 从 0.6 指数衰减到 0.1（10000 ep，BC 预训练后无需从 1.0 起步）
-- Episode 0~2999 仅精简版 reward（惩罚+完成奖励），3000+ 品质项线性升温，10000+ 完整版 reward
-- Replay buffer：ExpertReplayBuffer（专家常驻区容量 = EXPERT_TOTAL_TRANSITIONS = 70000，探索区容量 = EXPERT_TOTAL_BUFFER − EXPERT_TOTAL_TRANSITIONS = 30000，总 100000；采样整池均匀随机）
-- PER α=0.6, β=0.4→1.0（参数保留，但 sample 当前为整池均匀随机，PER 暂未实际启用）
-
-## 导出机制
-
-训练/推理后通过 `export_layout()` 导出：
-1. 从缓存的全量 board 中找到对应 footprint
-2. 只改位置/旋转/层（原有走线、敷铜、丝印、3D 模型全部保留）
-3. 输出新的 .kicad_pcb 文件
-
-## 测试
-
-```powershell
-# Mock 测试（无需 KiCad，随时可跑）
-pytest tests/ --ignore=tests/kicad
-
-# KiCad 集成测试（需设置 KICAD_PATH）
-pytest tests/kicad/
-
-# 全部测试（需设置 KICAD_PATH）
-pytest tests/
-```
-
-## 超参数配置
-
-关键超参数见 `config/argument.txt`，部分重要参数：
-
-| 参数 | 值 | 说明 |
-|:---|:---|:---|
-| EPSILON_START | 0.6 | ε-greedy 初值 |
-| EPSILON_MIN | 0.1 | ε-greedy 下界 |
-| EXPERT_TRAJECTORIES_PER_BOARD | 20 | 每板生成专家轨迹数 |
-| EXPERT_EPSILON_DECOMPOSE | 0.5 | 拆解随机化概率 |
-| EXPERT_BC_EPOCHS | 50 | BC 预训练 epoch 数 |
-| EXPERT_TOTAL_BUFFER | 100000 | 专家组 buffer 总容量（专家区+探索区）；唯一可调旋钮之一 |
-| EXPERT_BUFFER_RATIO | 0.7 | 专家占总体比例（唯一可调旋钮之二）；驱动 buffer 构成与生成目标；采样仍为整池均匀随机 |
-| EXPERT_TOTAL_TRANSITIONS | 70000 | 派生（=EXPERT_TOTAL_BUFFER×EXPERT_BUFFER_RATIO）：生成目标=专家常驻区容量，勿在 argument.txt 直接设 |
-| PER_ALPHA | 0.6 | 优先级指数 |
+**训练/推理不需要 KiCad**（几何走仓库内的 `data/model_cache/`）；只有"重建缓存"
+（`scripts/dump_models.py`）和"读真实板的测试"（`pytest tests/kicad`）需要本机装 KiCad 10.0+ 并设 `KICAD_PATH`。

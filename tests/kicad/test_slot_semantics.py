@@ -33,7 +33,10 @@ from env import violations as vio                 # noqa: E402
 from utils.kicad_utils import pcb_model as pm     # noqa: E402
 
 pytestmark = pytest.mark.require_kicad
-pcbnew = pm.pcbnew
+# ⚠️ 必须走 importorskip，不能写成 `pcbnew = pm.pcbnew`：模块级硬取属性会在**收集期**抛
+#    AttributeError ⇒ 没设 KICAD_PATH 的机器上 `pytest tests` 直接中断（0 用例跑）。
+#    `require_kicad` 那条跳过走的是 runtest setup，管不到收集期。
+pcbnew = pytest.importorskip("pcbnew", reason="需要 KiCad 环境（KICAD_PATH）")
 
 
 def _board(sub, all_kicad_pcb_paths):

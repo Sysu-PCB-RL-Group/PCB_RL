@@ -67,6 +67,7 @@ def test_defaults_match_the_agreed_config():
     assert td.DEFAULTS["out"] == "output", "产物目录 = output/（Owner 2026-09-23）"
     assert td.DEFAULTS["seed"] == 114514, "固定种子 114514（Owner 2026-09-23）"
     assert td.DEFAULTS["target_every_episodes"] == 20, "目标网同步 100 → 20（Owner 2026-09-23）"
+    assert td.DEFAULTS["ckpt_every"] == 0, "断点默认关闭（Owner 2026-09-24：只保 best.pt）"
 
     ns = td.build_parser().parse_args([])
     assert (ns.episodes, ns.update_every, ns.batch, ns.eval_every_episodes) == (1000, 4, 32, 50)
@@ -118,14 +119,15 @@ def test_better_rule_prefers_completion_then_hpwl():
 
 # ---------------- B. 主循环 + 落盘 ----------------
 
-def test_train_smoke_writes_log_and_checkpoints(tmp_path):
+def test_train_smoke_writes_log_and_best_only(tmp_path):
+    """主循环跑通 + **产物口径**（Owner 2026-09-24）：只保 `best.pt`、出训练效果图、`train.log` 精简。"""
     b = _cheapest_board()
     agent = _tiny_agent()
     env = PcbEnv(boards=[b], use_lookahead=True)
     out = str(tmp_path / "run")
 
     summary = td.train(episodes=2, update_every=0, eval_every_episodes=1, log_every=1,
-                       ckpt_every=1, batch=4, capacity=64, boards=[b], out=out,
+                       ckpt_every=0, batch=4, capacity=64, boards=[b], out=out,
                        agent=agent, env=env, verbose=False)
 
     lines = [json.loads(x) for x in open(os.path.join(out, "log.jsonl"), encoding="utf-8")]
@@ -146,14 +148,39 @@ def test_train_smoke_writes_log_and_checkpoints(tmp_path):
     assert 0.0 <= row["completion"] <= 1.0 and row["h_ratio"] > 0.0
     assert row["n_placed"] <= row["n_total"]
 
-    assert os.path.isfile(os.path.join(out, "ckpt_ep1.pt")) and os.path.isfile(os.path.join(out, "ckpt_ep2.pt"))
+    # ★ 产物 = 4 个（**没有断点**：Owner 2026-09-24"只保 best"）
+    names = sorted(os.listdir(out))
+    assert names == ["best.pt", "log.jsonl", "train.log", "train_curves.png"], f"产物不对：{names}"
+    assert not any(n.startswith("ckpt_ep") for n in names), "断点默认不落"
+    assert os.path.getsize(os.path.join(out, "train_curves.png")) > 10_000, "效果图应是真图"
+    assert summary["curves"] and summary["curves"]["episodes"] == 2
+    assert summary["curves"]["steps_last"] is not None, "效果图也含每局步数（Owner 2026-09-24）"
+    assert summary["curves"]["env_steps"] == summary["env_steps"]
 
-    # train.log：人类可读的完整日志（头信息 + 进度 + 评估 + 收尾汇总）
+    # train.log：进度行 = **5 项**（loss / reward / steps / ε / 完成度）；评估 1 行；summary 不逐次罗列
     tlog = open(os.path.join(out, "train.log"), encoding="utf-8").read()
     assert "[out]" in tlog and "（已清零）" in tlog
     assert "[eval]" in tlog and "HPWL÷H_ref" in tlog
     assert "[summary]" in tlog and "[done]" in tlog
     assert f"目标网每 {td.DEFAULTS['target_every_episodes']} 局同步" in tlog
+    tr = [line for line in tlog.splitlines() if line.startswith("[train]")]
+    assert tr, "应有进度行"
+    for line in tr:
+        assert len(line.split("｜")) == 5, f"进度行应为 5 项：{line}"
+        for key in ("loss", "reward", "steps", "ε", "完成度"):
+            assert key in line, f"进度行缺 {key}：{line}"
+    assert "eval@" not in tlog, "summary 不再逐次罗列评估明细（Owner 2026-09-24）"
+
+
+def test_ckpt_every_still_works_when_explicit(tmp_path):
+    """显式 `--ckpt-every N` 仍能落断点（默认 0 = 关，但参数**没被删**）。"""
+    b = _cheapest_board()
+    out = str(tmp_path / "run")
+    td.train(episodes=2, update_every=0, eval_every_episodes=0, log_every=0, ckpt_every=1,
+             batch=4, capacity=64, boards=[b], out=out, agent=_tiny_agent(),
+             env=PcbEnv(boards=[b], use_lookahead=True), verbose=False)
+    assert os.path.isfile(os.path.join(out, "ckpt_ep1.pt"))
+    assert os.path.isfile(os.path.join(out, "ckpt_ep2.pt"))
 
 
 # ---------------- C. 更新频率 ----------------

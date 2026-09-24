@@ -45,7 +45,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 MODES: Dict[str, str] = {
-    "train": "训练（Double DQN，台账 §9.2；产物 → output/：train.log / log.jsonl / ckpt_epN.pt / best.pt）",
+    "train": "训练（Double DQN，台账 §9.2；产物 → output/：best.pt / train_curves.png / train.log / log.jsonl）",
     "infer": "推理（纯贪心、mask = L；产物 → result/infer_<权重名>_ep<局号>/：日志 + summary.json + 图）",
 }
 

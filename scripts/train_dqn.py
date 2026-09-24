@@ -8,7 +8,7 @@
 --batch 32             采样批量
 --eval-every-episodes 50   每 50 局跑一次评估（16 板；贪心、推理档 mask = L）
 --log-every 10         每 10 局打一行进度
---ckpt-every 100       每 100 局落一次断点
+--ckpt-every 0         断点：**默认不落**（Owner 2026-09-24：只保 `best.pt`；要断点就显式给 N）
 --capacity 10000       打包回放容量（≈ 3.80 GB @200×200；Owner 暂定）
 --target-every-episodes 20   目标网硬同步周期（Owner 2026-09-23：先 100，后因"只跑 100 局"改为 **20**）
 --seed 114514          **固定种子**（Owner 2026-09-23）：连网络初始化的随机权重也由它决定 ⇒ 同一命令可复现
@@ -24,13 +24,17 @@
 ```
 产物（`--out`，默认 **`output/`**；**写入前清零** —— Owner 2026-09-23 拍："结果跟之前一样写入 output/ 即可，写入前清零"）
 ```text
-train.log       **人类可读**的完整运行日志（与终端同内容：开跑头信息 + 每 log_every 局的进度 + 每次评估 +
-                收尾 `[summary]` 汇总块：配置 / 用时 / best / 每次评估的指标）—— 事后直接打开就能读全貌
-log.jsonl       第 1 行 kind=config（配置）｜每局 1 行 kind=episode｜每 log_every 局 1 行 kind=state
-                （**训练状态**：ε / lr / steps / updates / episodes / 目标网同步次数 / 回放条数与 GB / 吞吐）
-                ｜每 eval_every 局 1 行 kind=eval（16 板逐板 + 均值 + is_best）
-ckpt_ep{N}.pt   每 ckpt_every 局一个断点（实测 0.68 MB：在线网 + 目标网 + Adam + 计数器）
-best.pt         每次评估若"更好"就（覆盖）保存 —— 判据：**完成度更高**，打平则 `HPWL÷H_ref` 更低（§0.6 m 主指标）
+best.pt           **唯一**的权重产物：每次评估若"更好"就（覆盖）保存 —— 判据：完成度更高，
+                  打平则 `HPWL÷H_ref` 更低（§0.6 m 主指标）
+                  ⚠️ Owner 2026-09-24：**不再每 N 局落断点**（`--ckpt-every` 默认 0 = 不落）
+train_curves.png  训练效果图（一张图 **三个**子图，均随 episode：loss ｜ 一局累计 reward ｜ **每局步数**
+train.log         **人类可读**日志（与终端同内容）。Owner 2026-09-24 精简为：
+                  开跑头信息 1 行 + 每 log_every 局一行进度（**loss / 一局累计 reward / steps / ε / 完成度**）
+                  + 每次评估一行（均值：完成度 / `HPWL÷H_ref` / 早终止 / 是否 best）
+                  + 收尾 `[summary]` 4 行（配置 / 用时 / best / 产物）—— **不再逐次罗列 20 行评估明细**
+log.jsonl        机器可读全量（**不精简**，供事后分析与画图复现）：
+                  第 1 行 kind=config｜每局 1 行 kind=episode｜每 log_every 局 1 行 kind=state
+                  ｜每 eval_every 局 1 行 kind=eval（逐板 + 均值 + is_best）
 ```
 ⚠️ "清零" = 删掉 `--out` 目录内的全部内容；带一条**安全闸**：目标目录若看起来像仓库目录（含 `.git`/`data`/`env`/
 `tests`/`scripts`/`docs`/`utils` 或就是仓库根）⇒ **拒绝**并报错（防手滑清错目录）。
@@ -62,7 +66,7 @@ DEFAULTS: Dict[str, Any] = {
     "batch": 32,
     "eval_every_episodes": 50,
     "log_every": 10,
-    "ckpt_every": 100,
+    "ckpt_every": 0,         # 断点：Owner 2026-09-24 拍"只保 best" ⇒ 默认不落（要断点显式 --ckpt-every N）
     "capacity": 10_000,
     "target_every_episodes": 20,   # 目标网硬同步：Owner 2026-09-23 由 100 改为 20（因只跑 100 局）
     "seed": 114514,          # 固定种子（Owner 2026-09-23）—— 连网络初始化也由它决定，见 seed_all()
@@ -280,6 +284,11 @@ def train(*, episodes: int = DEFAULTS["episodes"], update_every: int = DEFAULTS[
                                                  recent_loss=last_loss_seen),
                                     ensure_ascii=False) + "\n")
 
+            if log_every and ep % int(log_every) == 0:                 # ★ 进度行（Owner 2026-09-24：只这 5 项）
+                say(f"[train] ep{ep:>5} loss {'—' if last_loss is None else f'{last_loss:.4f}'}"
+                    f"｜reward {ep_ret:+.4f}｜steps {agent.steps}｜ε {agent.epsilon():.3f}"
+                    f"｜完成度 {info['completion']:.3f}")
+
             if eval_every_episodes and ep % int(eval_every_episodes) == 0:
                 ev = evaluate(agent, board_list, cache_root=cache_root)
                 ev.update(kind="eval", episode=ep, wall_s=round(time.perf_counter() - t0, 1))
@@ -292,22 +301,28 @@ def train(*, episodes: int = DEFAULTS["episodes"], update_every: int = DEFAULTS[
                 fh.write(json.dumps(ev, ensure_ascii=False) + "\n")
                 say(f"[eval] ep{ep:>5} 完成度 {ev['completion']:.3f}｜HPWL÷H_ref {ev['h_ratio']:.3f}"
                     f"｜早终止 {ev['deadlocks']}/{ev['n_boards']}"
-                    f"{'｜★best.pt' if ev['is_best'] else ''}｜{ev['wall_s']}s")
-            elif log_every and ep % int(log_every) == 0:
-                say(f"[train] ep{ep:>5} ret {ep_ret:+.4f}｜完成度 {info['completion']:.3f}"
-                    f"｜ε {agent.epsilon():.3f}｜loss {'—' if last_loss is None else f'{last_loss:.4f}'}"
-                    f"｜steps {agent.steps}｜updates {agent.updates}｜{rec['wall_s']}s")
+                    f"{'｜★best.pt' if ev['is_best'] else ''}")
 
-            if ckpt_every and ep % int(ckpt_every) == 0:
+            if ckpt_every and ep % int(ckpt_every) == 0:               # 默认 0 ⇒ 不落（Owner 2026-09-24）
                 torch_save(os.path.join(out, f"ckpt_ep{ep}.pt"),
                            {"agent": agent.state_dict(), "episode": ep, "config": cfg})
 
             fh.flush()          # 每局把日志落盘 ⇒ 可以边跑边 `tail` / 打开 log.jsonl 看
 
     elapsed = time.perf_counter() - t0
+
+    # ---- 训练效果图（Owner 2026-09-24）：loss / 一局累计 reward 随 episode 的曲线 ----
+    curves: Optional[Dict[str, Any]] = None
+    try:
+        from utils import viz_train                     # 局部导入：画图只在收尾用一次
+        curves = viz_train.draw_training_curves(hist, os.path.join(out, viz_train.DEFAULT_NAME))
+    except Exception as e:                              # noqa: BLE001 —— 画图不许拖垮训练
+        say(f"[warn] 训练效果图生成失败（不影响训练结果）：{type(e).__name__}: {e}")
+
     summary = {"episodes": episodes, "env_steps": agent.steps, "updates": agent.updates,
                "elapsed_s": round(elapsed, 1), "steps_per_s": round(agent.steps / max(elapsed, 1e-9), 2),
                "log": log_path, "out": out, "best_pt": os.path.join(out, "best.pt") if best else None,
+               "curves": curves,
                "best": ({k: best[k] for k in ("episode", "completion", "h_ratio", "deadlocks")}
                         if best else None),
                "last_evals": evals[-1] if evals else None}
@@ -316,7 +331,7 @@ def train(*, episodes: int = DEFAULTS["episodes"], update_every: int = DEFAULTS[
         + (f"｜best: ep{best['episode']} 完成度 {best['completion']:.3f} "
            f"HPWL÷H_ref {best['h_ratio']:.3f}" if best else ""))
 
-    # ---- 收尾汇总（写进 train.log，事后一眼可读） ----
+    # ---- 收尾汇总（Owner 2026-09-24 精简：配置 / 用时 / best / 效果图 / 产物 各一行） ----
     say("=" * 78)
     say(f"[summary] 配置：episodes={episodes}｜update_every={update_every}｜batch={batch}｜"
         f"eval_every={eval_every_episodes}｜target_every={target_every_episodes}｜capacity={capacity}｜"
@@ -326,11 +341,12 @@ def train(*, episodes: int = DEFAULTS["episodes"], update_every: int = DEFAULTS[
     if best:
         say(f"[summary] **best.pt**：ep{best['episode']}｜完成度 {best['completion']:.4f}｜"
             f"HPWL÷H_ref {best['h_ratio']:.4f}｜早终止 {best['deadlocks']}（专家 = 1.0，越小越好）")
-    for ev in evals:
-        say(f"[summary] eval@{ev['episode']:>4}：完成度 {ev['completion']:.4f}｜"
-            f"HPWL÷H_ref {ev['h_ratio']:.4f}｜早终止 {ev['deadlocks']}/{ev['n_boards']}"
-            f"{'｜★best' if ev.get('is_best') else ''}")
-    say(f"[summary] 产物：{os.path.abspath(out)}（log.jsonl / train.log / best.pt / ckpt_ep*.pt）")
+    if curves:
+        loss_txt = "—" if curves["loss_last"] is None else f"{curves['loss_last']:.4f}"
+        ret_txt = "—" if curves["ret_ma_last"] is None else f"{curves['ret_ma_last']:+.4f}"
+        say(f"[summary] 效果图：{os.path.basename(curves['path'])}"
+            f"（loss 末值 {loss_txt}｜reward 滑动均值末值 {ret_txt}）")
+    say(f"[summary] 产物：{os.path.abspath(out)}（best.pt / train_curves.png / train.log / log.jsonl）")
     say("=" * 78)
     tlog.close()
     return summary
@@ -352,7 +368,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-every-episodes", type=int, default=DEFAULTS["eval_every_episodes"],
                    help="每多少局跑一次评估（0 = 不评估）")
     p.add_argument("--log-every", type=int, default=DEFAULTS["log_every"])
-    p.add_argument("--ckpt-every", type=int, default=DEFAULTS["ckpt_every"])
+    p.add_argument("--ckpt-every", type=int, default=DEFAULTS["ckpt_every"],
+                   help="每多少局落一个断点（0 = 不落；只保 best.pt，Owner 2026-09-24）")
     p.add_argument("--capacity", type=int, default=DEFAULTS["capacity"])
     p.add_argument("--target-every-episodes", type=int, default=DEFAULTS["target_every_episodes"],
                    help="每多少个 episode 硬同步一次目标网（Owner 2026-09-23：由 100 改为 20）")

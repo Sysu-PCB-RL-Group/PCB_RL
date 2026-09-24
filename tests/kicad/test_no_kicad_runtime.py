@@ -69,8 +69,10 @@ from env import lookahead as la                     # noqa: E402
 from env import order_plan as op                    # noqa: E402
 from env import violations as vio                   # noqa: E402
 
-# ---- 惰性导出守门：上一代模块一个都不许被连带导入 ----
-_LEGACY = ("utils.kicad_utils.kicad_utils", "env.pcb_layout_env", "env.pcb_utils")
+# ---- 惰性导出守门：上一代导入层不许被连带导入 ----
+# 注：env.pcb_layout_env / env.pcb_utils 已于 2026-09-24 删除（历史见 590fa92），
+#     剩下 utils.kicad_utils.kicad_utils（上一代读写层）仍必须靠惰性导入留在训练进程外。
+_LEGACY = ("utils.kicad_utils.kicad_utils",)
 legacy = sorted(m for m in sys.modules if m in _LEGACY)
 assert not legacy, "上一代模块被连带导入了（惰性导出被破坏）：" + repr(legacy)
 
@@ -205,21 +207,35 @@ def test_every_cached_board_loads_without_build():
 # ===================== C. 惰性导出不破坏旧链路 =====================
 
 def test_lazy_exports_keep_legacy_links_and_reject_typos():
-    """PEP 562 惰性导出：旧符号仍可取用（`from utils.kicad_utils import KiCadUtils` 等），
-    且拼错的名字必须抛 `AttributeError`（不能静默吞掉）。"""
+    """`utils.kicad_utils` 的 PEP 562 惰性导出：旧符号仍可取用
+    （`from utils.kicad_utils import KiCadUtils`），且拼错的名字必须抛 `AttributeError`（不能静默吞掉）。
+
+    注：`env` 侧的同类断言已于 2026-09-24 移出（上一代三件套删除 ⇒ 那段惰性导出机制一并移除），
+    改由下面的 `test_env_package_has_no_legacy_symbols` 反向钉死。
+    """
     import utils.kicad_utils as ku
-    import env as env_pkg
 
-    for pkg in (ku, env_pkg):
-        with pytest.raises(AttributeError):
-            getattr(pkg, "NoSuchSymbol")
+    with pytest.raises(AttributeError):
+        getattr(ku, "NoSuchSymbol")
 
-    # 旧链路可用（惰性导入在访问时发生）
+    # 旧链路可用（惰性导入在访问时发生）—— 它是"训练进程不拉 KiCad"的关键
     assert set(ku.__all__) == {"Component", "Net", "KiCadUtils"}
     assert isinstance(ku.KiCadUtils, type)
     assert isinstance(ku.Net, type) and isinstance(ku.Component, type)
 
-    assert set(env_pkg.__all__) == {"PCBUtils", "PCBLayoutEnv"}
-    assert isinstance(env_pkg.PCBUtils, type)          # 不依赖 gymnasium
-    pytest.importorskip("gymnasium", reason="上一代 env 需要 gymnasium；与本条守门无关")
-    assert isinstance(env_pkg.PCBLayoutEnv, type)
+
+def test_env_package_has_no_legacy_symbols():
+    """`env` 已是**朴素包**：上一代符号不得复活（2026-09-24 删除 `pcb_layout_env`/`pcb_utils`/`mock_pcb`）。
+
+    为什么要钉死：历史上 `env/__init__.py` 用 PEP 562 惰性导出 `PCBUtils` / `PCBLayoutEnv`；
+    若有人图省事把旧符号挂回来，`from env import grid_render` 就会连带把
+    `gymnasium` + 上一代 `pcb_utils` + `utils.kicad_utils.KiCadUtils` 整条旧链拉进训练进程。
+    """
+    import env as env_pkg
+
+    assert not hasattr(env_pkg, "__all__"), \
+        f"env 不应再声明 __all__（已无上一代符号）：{getattr(env_pkg, '__all__', None)}"
+    for name in ("PCBUtils", "PCBLayoutEnv", "pcb_utils", "pcb_layout_env", "mock_pcb"):
+        assert not hasattr(env_pkg, name), f"env.{name} 应已随上一代三件套删除"
+    with pytest.raises(AttributeError):
+        getattr(env_pkg, "NoSuchSymbol")

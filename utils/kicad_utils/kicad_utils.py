@@ -4,7 +4,7 @@
 和布局导出（RL 优化结果 → .kicad_pcb）功能。
 
 维护方：KiCad 导入导出负责同学。
-接口契约详见 docs/kicad_interface.md。
+接口契约详见 docs/旧版结构文档/kicad_interface.md。
 """
 # 注解延迟求值：本模块的注解里出现 `pcbnew.*`，而 `pcbnew` 只在 KICAD_PATH 就绪时才存在。
 # 不加这行时，类体里的默认参数注解（如 `get_raw_board_outline(self, board: Optional[pcbnew.BOARD] = None)`）
@@ -198,7 +198,7 @@ class KiCadUtils:
     - 导出：export_layout()
 
     导入逻辑和导出逻辑均由 KiCad 同学负责实现和维护。
-    接口契约详见 docs/kicad_interface.md。
+    接口契约详见 docs/旧版结构文档/kicad_interface.md。
     """
 
     def __init__(self):
