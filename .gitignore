@@ -50,3 +50,9 @@ Thumbs.db
 
 # Generated expert trajectories (regenerable, do not commit)
 data/expert_transitions/
+
+# 版本归档（每次打包一个快照 zip，不入库）
+history/
+
+# 远程开发辅助脚本（本机专用工具，不入库）
+remote_development/
